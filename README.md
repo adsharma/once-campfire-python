@@ -47,7 +47,7 @@ any Python 3 and never depends on `match` semantics.
 |---|---|
 | `User`, roles, statuses | `User` + `ROLE_*`/`STATUS_*`, `can_administer`, `can_create_room` |
 | `Room`, `Rooms::Open/Closed/Direct` | `Room.kind`, `default_involvement`, `direct_type_change_blocked`, `find_or_create_direct_room` (exact user-set match) |
-| `Membership`, `Connectable` (60s TTL) | `Membership`, `is_connected`, `present/disconnect/disconnect_all` |
+| `Membership`, `Connectable` (60s TTL) | `RoomMembership` (`Membership` collides with Lean core), `is_connected`, `present/disconnect/disconnect_all` |
 | `Message`, `Mentionee`, `Pagination` (40/page) | `Message`, `post_message`, `message_mentionees`, `last/first/before/after/around` |
 | `Boost` (16-char limit) | `boost_message` |
 | `Ban` (public IPs only) | `validate_ban_ip` (strict IPv4 + minimal IPv6), `ban_user`/`unban_user` |
@@ -75,9 +75,37 @@ delivery, `Transferable` (Rails signed ids), ONCE platform glue
 | Transpile Go | `py2many --go campfire.py --outdir out_go` | ✅ clean (gofmt) |
 | Compile Go | `go build` + `go vet` on output | ✅ clean |
 | Contracts | `CHECKER.pre/post` on ~40 functions | ✅ stripped for Rust/Go |
+| Lean | `py2many --lean` + `lake build` | ✅ file elaborates; ~80 obligations auto-discharged, 20 open (see below) |
 | SMT | `py2many --smt` | ❌ toolchain crash (missing `cljstyle`, `None.startwith`) |
-| Lean | `py2many --lean` + `lake build` | ⏳ deferred — CHECKS are in place for it |
 | Compile Rust | `rustc` on output | ❌ later: needs owned-`String` overhaul in py2many |
+
+## Lean verification (20 open obligations)
+
+`lake build` elaborates the whole file; every remaining error is a genuine
+proof obligation (no translation gaps left). Closed automatically: all
+single-return definitional posts, all error-branch returns (`¬False`), all
+positive if/elif/else branches (hypotheses + `simp_all`/`omega`/`decide`/`grind`),
+trivial call-site pres. Open classes:
+
+- **Loops (9)**: `remove_all`, `same_id_set`, `sound_command`, `parse_ipv4`,
+  `format_join_code`, `last_page`, `first_page`, `page_around`,
+  `record_search` (touch path) — need loop invariants / indexed reasoning.
+- **Data (5)**: `create_user`, `create_room`, `post_message`, `boost_message`,
+  `start_session` success returns (`id > 0` from `alloc_id`, opaque).
+- **Call-opaque (4)**: `apply_webhook_reply` ×2, `create_account`,
+  `record_search` touch path — need callee postcondition propagation.
+- **String library (2)**: `bot_key_of` (`toString` length), `deactivated_email`
+  (`splitOn` round-trip lemma).
+
+Two porting conventions came out of this and are applied throughout:
+
+- Guard sequences are `if`/`elif`/`else` chains (never fallthrough returns),
+  so each branch's negations are available as hypotheses.
+- Success values are constructed inline at `return` (sharing one allocated
+  id via a `new_id` local) so postconditions see the literal.
+- `CHECKER.pre` appears only where call sites can discharge it (trivially
+  true `Nat` facts, or uncalled functions); `Membership` was renamed
+  `RoomMembership` (Lean core collision) and helpers are ordered before use.
 
 Run py2many from the checkout (it contains the lookup-table fixes below;
 released 0.9 lacks them):
@@ -86,11 +114,10 @@ released 0.9 lacks them):
 cd ~/src/py2many && uv run --project . python -m py2many --go /path/to/campfire.py --outdir out_go
 ```
 
-## Toolchain fixes (in `~/src/py2many`, uncommitted)
+## Toolchain fixes (in `~/src/py2many`; Go fixes in PR #850, Lean fixes in PR #851)
 
-Made while transpiling this port; covered by the repo suite
-(`test_generated -k "go or rust"`: 68 passed, 0 failed) plus `go build`
-of this port's output:
+Made while transpiling this port; covered by the repo suite plus `go build`
+of this port's output and `lake build` of its Lean output:
 
 - `py2many/rewriters.py` — `CheckerBlockRemover.visit_If` now recurses
   (`generic_visit`), so CHECKER blocks nested inside regular `if`s are
@@ -103,6 +130,13 @@ of this port's output:
   iteration yielding 1-byte strings (Go `range` would yield runes and break
   every string comparison); `.append` rewriting extended to inferred
   `list[T]` variables and `store.items.append(...)` attribute targets.
+- `pylean/*` — subtype parens, `str` method table (`startsWith`, `splitOn`,
+  `trim`, `toLower`, …), `ord`/`chr`, lowercase containers, `String`
+  iteration via `toList.map toString`, `++` for `String`, struct functional
+  updates, `let mut` for field-mutated params, `Inhabited` derivation,
+  default-filled partial literals, `if hN` hypotheses, uniform
+  `(try simp_all) <;> (first | omega | decide | grind)` return tactic,
+  `Int` widening for `-1` sentinels with call-site `.toNat`/coercions.
 
 ## Known limitations
 

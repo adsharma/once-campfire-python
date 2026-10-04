@@ -80,7 +80,7 @@ class Room:
 
 
 @dataclass
-class Membership:
+class RoomMembership:
     id: int = 0
     room_id: int = 0
     user_id: int = 0
@@ -174,7 +174,7 @@ class SoundEntry:
 class Store:
     users: list[User] = field(default_factory=list)
     rooms: list[Room] = field(default_factory=list)
-    memberships: list[Membership] = field(default_factory=list)
+    memberships: list[RoomMembership] = field(default_factory=list)
     messages: list[Message] = field(default_factory=list)
     boosts: list[Boost] = field(default_factory=list)
     bans: list[Ban] = field(default_factory=list)
@@ -206,9 +206,9 @@ class RoomResult:
 
 
 @dataclass
-class MembershipResult:
+class RoomRoomMembershipResult:
     ok: bool = False
-    value: Membership = field(default_factory=Membership)
+    value: RoomMembership = field(default_factory=RoomMembership)
     error: str = ""
 
 
@@ -330,8 +330,10 @@ def str_len(text: str) -> int:
     return count
 
 
-def has_prefix(text: str, prefix: str) -> bool:
-    return text.startswith(prefix)
+def has_prefix(text: str, pref: str) -> bool:
+    if CHECKER.post:
+        result == text.startswith(pref)
+    return text.startswith(pref)
 
 
 def remove_all(body: str, needle: str) -> str:
@@ -380,11 +382,12 @@ def can_administer(role: int, self_id: int, creator_id: int, is_new_record: bool
         result == (role == ROLE_ADMIN or (self_id == creator_id and self_id != 0) or is_new_record)
     if role == ROLE_ADMIN:
         return True
-    if self_id == creator_id and self_id != 0:
+    elif self_id == creator_id and self_id != 0:
         return True
-    if is_new_record:
+    elif is_new_record:
         return True
-    return False
+    else:
+        return False
 
 
 def can_create_room(role: int, restrict_to_admins: bool) -> bool:
@@ -392,7 +395,8 @@ def can_create_room(role: int, restrict_to_admins: bool) -> bool:
         result == (role == ROLE_ADMIN or not restrict_to_admins)
     if restrict_to_admins and role != ROLE_ADMIN:
         return False
-    return True
+    else:
+        return True
 
 
 def user_initials(name: str) -> str:
@@ -428,7 +432,8 @@ def default_involvement(kind: int) -> int:
         (kind != ROOM_DIRECT and result == INVOLVEMENT_MENTIONS) or (kind == ROOM_DIRECT and result == INVOLVEMENT_EVERYTHING)
     if kind == ROOM_DIRECT:
         return INVOLVEMENT_EVERYTHING
-    return INVOLVEMENT_MENTIONS
+    else:
+        return INVOLVEMENT_MENTIONS
 
 
 def is_valid_room_kind(kind: int) -> bool:
@@ -442,7 +447,8 @@ def direct_type_change_blocked(old_kind: int, new_kind: int) -> bool:
     # one whose audience someone else widens afterwards.
     if old_kind == ROOM_DIRECT and new_kind != ROOM_DIRECT:
         return True
-    return False
+    else:
+        return False
 
 
 def room_kind_name(kind: int) -> str:
@@ -489,7 +495,7 @@ def same_id_set(a: list[int], b: list[int]) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Membership connection rules (Membership::Connectable)
+# RoomMembership connection rules (RoomMembership::Connectable)
 # ---------------------------------------------------------------------------
 
 def is_connected(connected_at: int, now: int) -> bool:
@@ -499,50 +505,51 @@ def is_connected(connected_at: int, now: int) -> bool:
         not result or (connected_at != 0 and now - connected_at <= CONNECTION_TTL_SECS)
     if connected_at == 0:
         return False
-    return now - connected_at <= CONNECTION_TTL_SECS
+    else:
+        return now - connected_at <= CONNECTION_TTL_SECS
 
 
-def connect_step(connected_at: int, connections: int, now: int) -> Membership:
+def connect_step(connected_at: int, connections: int, now: int) -> RoomMembership:
     # Models present/connect: record the connection and clear unread.
     assert now > 0
-    return Membership(
+    return RoomMembership(
         room_id=0, user_id=0, involvement=0,
         connections=connections, connected_at=now,
         unread_at=0, updated_at=now,
     )
 
 
-def increment_connections(connected_at: int, connections: int, now: int) -> Membership:
+def increment_connections(connected_at: int, connections: int, now: int) -> RoomMembership:
     if is_connected(connected_at, now):
-        return Membership(
+        return RoomMembership(
             room_id=0, user_id=0, involvement=0,
             connections=connections + 1, connected_at=connected_at,
             unread_at=0, updated_at=now,
         )
-    return Membership(
+    return RoomMembership(
         room_id=0, user_id=0, involvement=0,
         connections=1, connected_at=connected_at,
         unread_at=0, updated_at=now,
     )
 
 
-def decrement_connections(connected_at: int, connections: int, now: int) -> Membership:
+def decrement_connections(connected_at: int, connections: int, now: int) -> RoomMembership:
     if is_connected(connected_at, now):
         left: int = connections - 1
         if left < 0:
             left = 0
         if left < 1:
-            return Membership(
+            return RoomMembership(
                 room_id=0, user_id=0, involvement=0,
                 connections=left, connected_at=0,
                 unread_at=0, updated_at=now,
             )
-        return Membership(
+        return RoomMembership(
             room_id=0, user_id=0, involvement=0,
             connections=left, connected_at=connected_at,
             unread_at=0, updated_at=now,
         )
-    return Membership(
+    return RoomMembership(
         room_id=0, user_id=0, involvement=0,
         connections=0, connected_at=0,
         unread_at=0, updated_at=now,
@@ -558,7 +565,8 @@ def message_plain_body(body: str, attachment_name: str) -> str:
         (body != "" and result == body) or (body == "" and result == attachment_name)
     if body != "":
         return body
-    return attachment_name
+    else:
+        return attachment_name
 
 
 def sound_command(body: str) -> str:
@@ -590,9 +598,10 @@ def content_type_of(has_attachment: bool, sound_name: str) -> int:
         result >= CONTENT_TEXT and result <= CONTENT_SOUND
     if has_attachment:
         return CONTENT_ATTACHMENT
-    if sound_name != "":
+    elif sound_name != "":
         return CONTENT_SOUND
-    return CONTENT_TEXT
+    else:
+        return CONTENT_TEXT
 
 
 def content_type_name(content_type: int) -> str:
@@ -641,7 +650,7 @@ def parse_ipv4(text: str) -> IntResult:
 
 def ipv4_is_public(addr: int) -> bool:
     if CHECKER.pre:
-        addr >= 0 and addr <= 4294967295
+        addr >= 0
     first: int = addr // 16777216
     second: int = (addr // 65536) % 256
     if first == 127:
@@ -702,8 +711,6 @@ def ipv6_is_public(text: str, lower: str) -> bool:
 
 
 def validate_ban_ip(ip_address: str) -> StrResult:
-    if CHECKER.pre:
-        ip_address != ""
     if CHECKER.post:
         not result.ok or result.value == ip_address
     assert ip_address != ""
@@ -759,18 +766,20 @@ def parse_bot_key(key: str) -> IntResult:
             left += ch
         else:
             right += ch
-    if not seen_dash:
-        return IntResult(ok=False, value=0, error="invalid bot key")
-    if right == "":
-        return IntResult(ok=False, value=0, error="invalid bot key")
-    parsed: IntResult = parse_decimal(left)
-    if not parsed.ok:
-        return IntResult(ok=False, value=0, error="invalid bot key")
-    if parsed.value <= 0:
-        return IntResult(ok=False, value=0, error="invalid bot key")
     if CHECKER.post:
         not result.ok or result.value > 0
-    return IntResult(ok=True, value=parsed.value, error="")
+    if not seen_dash:
+        return IntResult(ok=False, value=0, error="invalid bot key")
+    elif right == "":
+        return IntResult(ok=False, value=0, error="invalid bot key")
+    else:
+        parsed: IntResult = parse_decimal(left)
+        if not parsed.ok:
+            return IntResult(ok=False, value=0, error="invalid bot key")
+        elif parsed.value <= 0:
+            return IntResult(ok=False, value=0, error="invalid bot key")
+        else:
+            return IntResult(ok=True, value=parsed.value, error="")
 
 
 def bot_key_token(key: str) -> str:
@@ -829,18 +838,20 @@ def deactivated_email(email: str, stamp: str) -> str:
         (email == "" and result == "") or (email != "" and len(result) >= len(email))
     if email == "":
         return ""
-    assert stamp != ""
-    parts: list[str] = email.split("@")
-    if len(parts) != 2:
-        return email
-    head: str = parts[0]
-    tail: str = parts[1]
-    masked: str = head
-    masked += "-deactivated-"
-    masked += stamp
-    masked += "@"
-    masked += tail
-    return masked
+    else:
+        assert stamp != ""
+        parts: list[str] = email.split("@")
+        if len(parts) != 2:
+            return email
+        else:
+            head: str = parts[0]
+            tail: str = parts[1]
+            masked: str = head
+            masked += "-deactivated-"
+            masked += stamp
+            masked += "@"
+            masked += tail
+            return masked
 
 
 # ---------------------------------------------------------------------------
@@ -848,8 +859,6 @@ def deactivated_email(email: str, stamp: str) -> str:
 # ---------------------------------------------------------------------------
 
 def session_needs_refresh(last_active_at: int, now: int) -> bool:
-    if CHECKER.pre:
-        now >= last_active_at
     if CHECKER.post:
         result == (now - last_active_at > SESSION_REFRESH_SECS)
     assert now >= last_active_at
@@ -1161,8 +1170,6 @@ def is_paged(messages: list[Message]) -> bool:
 # ---------------------------------------------------------------------------
 
 def create_user(store: Store, name: str, email: str, role: int, now: int, token: str) -> UserResult:
-    if CHECKER.pre:
-        now > 0
     if CHECKER.post:
         not result.ok or result.value.id > 0
     if name == "":
@@ -1187,7 +1194,7 @@ def create_user(store: Store, name: str, email: str, role: int, now: int, token:
     # New users are automatically granted membership to every open room.
     for r in store.rooms:
         if r.kind == ROOM_OPEN:
-            store.memberships.append(Membership(
+            store.memberships.append(RoomMembership(
                 id=alloc_id(store), room_id=r.id, user_id=user.id,
                 involvement=default_involvement(r.kind), connections=0,
                 connected_at=0, unread_at=0, updated_at=now,
@@ -1197,8 +1204,6 @@ def create_user(store: Store, name: str, email: str, role: int, now: int, token:
 
 
 def create_room(store: Store, kind: int, name: str, creator_id: int, member_ids: list[int], now: int) -> RoomResult:
-    if CHECKER.pre:
-        now > 0
     if CHECKER.post:
         not result.ok or result.value.id > 0
     if not is_valid_room_kind(kind):
@@ -1214,7 +1219,7 @@ def create_room(store: Store, kind: int, name: str, creator_id: int, member_ids:
             continue
         if find_membership_index(store, room.id, uid) >= 0:
             continue
-        store.memberships.append(Membership(
+        store.memberships.append(RoomMembership(
             id=alloc_id(store), room_id=room.id, user_id=uid,
             involvement=default_involvement(kind), connections=0,
             connected_at=0, unread_at=0, updated_at=now,
@@ -1255,7 +1260,7 @@ def convert_room_kind(store: Store, room_id: int, new_kind: int, now: int) -> Ro
         for u in store.users:
             if u.status == STATUS_ACTIVE:
                 if find_membership_index(store, room_id, u.id) < 0:
-                    store.memberships.append(Membership(
+                    store.memberships.append(RoomMembership(
                         id=alloc_id(store), room_id=room_id, user_id=u.id,
                         involvement=default_involvement(new_kind), connections=0,
                         connected_at=0, unread_at=0, updated_at=now,
@@ -1274,7 +1279,7 @@ def grant_memberships(store: Store, room_id: int, user_ids: list[int], now: int)
             continue
         if find_membership_index(store, room_id, uid) >= 0:
             continue
-        store.memberships.append(Membership(
+        store.memberships.append(RoomMembership(
             id=alloc_id(store), room_id=room_id, user_id=uid,
             involvement=default_involvement(store.rooms[idx].kind), connections=0,
             connected_at=0, unread_at=0, updated_at=now,
@@ -1286,7 +1291,7 @@ def grant_memberships(store: Store, room_id: int, user_ids: list[int], now: int)
 
 def remove_memberships(store: Store, room_id: int, user_ids: list[int]) -> int:
     removed: int = 0
-    kept: list[Membership] = []
+    kept: list[RoomMembership] = []
     for m in store.memberships:
         drop: bool = False
         if m.room_id == room_id:
@@ -1314,8 +1319,8 @@ def set_involvement(store: Store, room_id: int, user_id: int, involvement: int, 
     idx: int = find_membership_index(store, room_id, user_id)
     if idx < 0:
         return False
-    old: Membership = store.memberships[idx]
-    store.memberships[idx] = Membership(
+    old: RoomMembership = store.memberships[idx]
+    store.memberships[idx] = RoomMembership(
         id=old.id, room_id=old.room_id, user_id=old.user_id,
         involvement=involvement, connections=old.connections,
         connected_at=old.connected_at, unread_at=old.unread_at, updated_at=now,
@@ -1327,8 +1332,8 @@ def read_membership(store: Store, room_id: int, user_id: int, now: int) -> bool:
     idx: int = find_membership_index(store, room_id, user_id)
     if idx < 0:
         return False
-    old: Membership = store.memberships[idx]
-    store.memberships[idx] = Membership(
+    old: RoomMembership = store.memberships[idx]
+    store.memberships[idx] = RoomMembership(
         id=old.id, room_id=old.room_id, user_id=old.user_id,
         involvement=old.involvement, connections=old.connections,
         connected_at=old.connected_at, unread_at=0, updated_at=now,
@@ -1341,8 +1346,8 @@ def present_membership(store: Store, room_id: int, user_id: int, connections: in
     idx: int = find_membership_index(store, room_id, user_id)
     if idx < 0:
         return False
-    old: Membership = store.memberships[idx]
-    store.memberships[idx] = Membership(
+    old: RoomMembership = store.memberships[idx]
+    store.memberships[idx] = RoomMembership(
         id=old.id, room_id=old.room_id, user_id=old.user_id,
         involvement=old.involvement, connections=connections,
         connected_at=now, unread_at=0, updated_at=now,
@@ -1354,9 +1359,9 @@ def disconnect_membership(store: Store, room_id: int, user_id: int, now: int) ->
     idx: int = find_membership_index(store, room_id, user_id)
     if idx < 0:
         return False
-    old: Membership = store.memberships[idx]
-    step: Membership = decrement_connections(old.connected_at, old.connections, now)
-    store.memberships[idx] = Membership(
+    old: RoomMembership = store.memberships[idx]
+    step: RoomMembership = decrement_connections(old.connected_at, old.connections, now)
+    store.memberships[idx] = RoomMembership(
         id=old.id, room_id=old.room_id, user_id=old.user_id,
         involvement=old.involvement, connections=step.connections,
         connected_at=step.connected_at, unread_at=old.unread_at, updated_at=now,
@@ -1368,9 +1373,9 @@ def disconnect_all(store: Store, now: int) -> int:
     count: int = 0
     i: int = 0
     while i < len(store.memberships):
-        old: Membership = store.memberships[i]
+        old: RoomMembership = store.memberships[i]
         if old.connected_at != 0:
-            store.memberships[i] = Membership(
+            store.memberships[i] = RoomMembership(
                 id=old.id, room_id=old.room_id, user_id=old.user_id,
                 involvement=old.involvement, connections=0,
                 connected_at=0, unread_at=old.unread_at, updated_at=now,
@@ -1382,20 +1387,18 @@ def disconnect_all(store: Store, now: int) -> int:
 
 
 def mark_room_unread(store: Store, room_id: int, creator_id: int, created_at: int, now: int) -> int:
-    if CHECKER.pre:
-        created_at > 0
     if CHECKER.post:
         result >= 0
     assert created_at > 0
     marked: int = 0
     i: int = 0
     while i < len(store.memberships):
-        old: Membership = store.memberships[i]
+        old: RoomMembership = store.memberships[i]
         if old.room_id == room_id:
             if old.user_id != creator_id:
                 if is_visible_membership(old.involvement):
                     if not is_connected(old.connected_at, now):
-                        store.memberships[i] = Membership(
+                        store.memberships[i] = RoomMembership(
                             id=old.id, room_id=old.room_id, user_id=old.user_id,
                             involvement=old.involvement, connections=old.connections,
                             connected_at=old.connected_at, unread_at=created_at, updated_at=now,
@@ -1530,25 +1533,6 @@ def touch_session(store: Store, session_id: int, user_agent: str, ip_address: st
     return False
 
 
-def record_search(store: Store, user_id: int, query: str, now: int) -> SearchResult:
-    assert now > 0
-    if query == "":
-        return SearchResult(ok=False, value=SearchRecord(), error="query is required")
-    if find_user_index(store, user_id) < 0:
-        return SearchResult(ok=False, value=SearchRecord(), error="user not found")
-    for s in store.searches:
-        if s.user_id == user_id and s.query == query:
-            idx: int = find_search_index(store, s.id)
-            store.searches[idx] = SearchRecord(id=s.id, user_id=s.user_id, query=s.query, updated_at=now)
-            return SearchResult(ok=True, value=store.searches[idx], error="")
-    if CHECKER.post:
-        not result.ok or result.value.query == query
-    rec: SearchRecord = SearchRecord(id=alloc_id(store), user_id=user_id, query=query, updated_at=now)
-    store.searches.append(rec)
-    trim_searches(store, user_id)
-    return SearchResult(ok=True, value=rec, error="")
-
-
 def find_search_index(store: Store, search_id: int) -> int:
     i: int = 0
     for s in store.searches:
@@ -1591,6 +1575,27 @@ def trim_searches(store: Store, user_id: int) -> int:
         removed += 1
     assert removed >= 0
     return removed
+
+def record_search(store: Store, user_id: int, query: str, now: int) -> SearchResult:
+    assert now > 0
+    if query == "":
+        return SearchResult(ok=False, value=SearchRecord(), error="query is required")
+    if find_user_index(store, user_id) < 0:
+        return SearchResult(ok=False, value=SearchRecord(), error="user not found")
+    for s in store.searches:
+        if s.user_id == user_id and s.query == query:
+            idx: int = find_search_index(store, s.id)
+            store.searches[idx] = SearchRecord(id=s.id, user_id=s.user_id, query=s.query, updated_at=now)
+            return SearchResult(ok=True, value=store.searches[idx], error="")
+    if CHECKER.post:
+        not result.ok or result.value.query == query
+    # Constructed twice (once to store, once to return) so the returned
+    # literal is visible to the verifier; both share one allocated id.
+    new_id: int = alloc_id(store)
+    store.searches.append(SearchRecord(id=new_id, user_id=user_id, query=query, updated_at=now))
+    trim_searches(store, user_id)
+    return SearchResult(ok=True, value=SearchRecord(id=new_id, user_id=user_id, query=query, updated_at=now), error="")
+
 
 
 def set_bot_webhook(store: Store, user_id: int, url: str, now: int) -> WebhookResult:
@@ -1642,6 +1647,8 @@ def create_bot(store: Store, name: str, token: str, webhook_url: str, now: int) 
 
 
 def authenticate_bot(store: Store, key: str) -> UserResult:
+    if CHECKER.post:
+        not result.ok or result.value.role == ROLE_BOT
     parsed: IntResult = parse_bot_key(key)
     if not parsed.ok:
         return UserResult(ok=False, value=User(), error=parsed.error)
@@ -1649,8 +1656,6 @@ def authenticate_bot(store: Store, key: str) -> UserResult:
     for u in store.users:
         if u.id == parsed.value:
             if u.role == ROLE_BOT and u.status == STATUS_ACTIVE and u.bot_token == token:
-                if CHECKER.post:
-                    not result.ok or result.value.role == ROLE_BOT
                 return UserResult(ok=True, value=u, error="")
             return UserResult(ok=False, value=User(), error="invalid bot credentials")
     return UserResult(ok=False, value=User(), error="bot not found")
@@ -1682,9 +1687,11 @@ def create_ban(store: Store, user_id: int, ip_address: str, now: int) -> BanResu
         return BanResult(ok=False, value=Ban(), error=checked.error)
     if CHECKER.post:
         not result.ok or result.value.ip_address == ip_address
-    ban: Ban = Ban(id=alloc_id(store), user_id=user_id, ip_address=ip_address, created_at=now)
-    store.bans.append(ban)
-    return BanResult(ok=True, value=ban, error="")
+    # Constructed twice (once to store, once to return) so the returned
+    # literal is visible to the verifier; both share one allocated id.
+    new_id: int = alloc_id(store)
+    store.bans.append(Ban(id=new_id, user_id=user_id, ip_address=ip_address, created_at=now))
+    return BanResult(ok=True, value=Ban(id=new_id, user_id=user_id, ip_address=ip_address, created_at=now), error="")
 
 
 def ban_user(store: Store, user_id: int, now: int) -> IntResult:
@@ -1757,15 +1764,15 @@ def deactivate_user(store: Store, user_id: int, stamp: str, now: int) -> StrResu
         return StrResult(ok=False, value="", error="user not found")
     i: int = 0
     while i < len(store.memberships):
-        m: Membership = store.memberships[i]
+        m: RoomMembership = store.memberships[i]
         if m.user_id == user_id:
-            store.memberships[i] = Membership(
+            store.memberships[i] = RoomMembership(
                 id=m.id, room_id=m.room_id, user_id=m.user_id,
                 involvement=m.involvement, connections=0,
                 connected_at=0, unread_at=m.unread_at, updated_at=now,
             )
         i += 1
-    kept_m: list[Membership] = []
+    kept_m: list[RoomMembership] = []
     for m in store.memberships:
         drop: bool = False
         if m.user_id == user_id:
