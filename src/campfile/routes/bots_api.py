@@ -9,12 +9,11 @@ pagination headers on listing.
 import time
 
 from flask import Blueprint, jsonify, request
-from sqlmodel import select
 
 from campfile import queries as q
 from campfile.db import Message
 from campfile import ops
-from campfile.routes.helpers import db_session, error, present
+from campfile.routes.helpers import db_session, error
 
 bp = Blueprint("bots_api", __name__)
 
@@ -33,41 +32,57 @@ def bot_list(rid, bot_key):
     room = _room_for_bot(db, bot, rid)
     if room is None:
         return error("not found", 404)
+    from campfile import fq as _fq
     M = Message.__sqlmodel__
-    query = select(M).where(M.room_id == rid)
     direction = "after" if request.args.get("after") else "before"
     anchor = request.args.get("after") or request.args.get("before")
+    conds = ['message.room_id == param("rid")']
+    params = {"rid": rid}
     if anchor and anchor.isdigit():
         pivot = db.get(M, int(anchor))
         if pivot is None or pivot.room_id != rid:
             return error("not found", 404)
+        params["ts"] = pivot.created_at
         if direction == "after":
-            query = query.where(M.created_at > pivot.created_at)
+            conds.append("message.created_at > param(\"ts\")")
         else:
-            query = query.where(M.created_at < pivot.created_at)
+            conds.append("message.created_at < param(\"ts\")")
     if direction == "after":
-        rows = db.exec(query.order_by(M.created_at).limit(40)).all()
+        keys = "message.created_at"
     else:
-        rows = db.exec(query.order_by(
-            M.created_at.desc()).limit(40)).all()
+        keys = "desc(message.created_at)"
+    rows = _fq.rows(db, _fq.MessageQuery([])
+                    .where(_fq.pred(" and ".join(conds)))
+                    .order_by(_fq.order(keys))
+                    .take(40).project(q.MSG_COLS),
+                    params)
+    if direction == "before":
         rows = list(reversed(rows))
     if not rows:
         return "", 204
     import dataclasses
     body = jsonify([dataclasses.asdict(v)
                     for v in q.views_for(db, list(rows))])
-    total = db.exec(select(Message.__sqlmodel__).where(
-        Message.__sqlmodel__.room_id == rid)).all()
-    body.headers["X-Total-Count"] = str(len(total))
+    total = _fq.rows(db, _fq.MessageQuery([])
+                     .where(_fq.pred('message.room_id == param("rid")'))
+                     .count(),
+                     {"rid": rid})
+    body.headers["X-Total-Count"] = str(
+        total[0]["COUNT(*)"] if total else 0)
     edge = rows[-1] if direction == "after" else rows[0]
-    more = db.exec(select(M).where(
-        M.room_id == rid,
-        (M.created_at > edge.created_at if direction == "after"
-         else M.created_at < edge.created_at)).limit(1)).all()
+    if direction == "after":
+        more_cond = "message.created_at > param(\"ts\")"
+    else:
+        more_cond = "message.created_at < param(\"ts\")"
+    more = _fq.rows(db, _fq.MessageQuery([])
+                    .where(_fq.pred(
+                        'message.room_id == param("rid") and (%s)' % more_cond))
+                    .take(1).project(["message.id"]),
+                    {"rid": rid, "ts": edge["created_at"]})
     if more:
         body.headers["Link"] = (
             "</rooms/%d/%s/messages?%s=%d>; rel=\"next\""
-            % (rid, bot_key, direction, edge.id))
+            % (rid, bot_key, direction, edge["id"]))
     return body
 
 
@@ -97,7 +112,7 @@ def bot_post(rid, bot_key):
     db.commit()
     resp = jsonify({})
     resp.status_code = 201
-    resp.headers["Location"] = "/rooms/%d/messages/%d" % (rid, res.value.id)
+    resp.headers["Location"] = "/rooms/%d/messages/%d" % (rid, res.value["id"])
     return resp
 
 
@@ -110,8 +125,8 @@ def bot_boost_create(rid, bot_key, mid):
     room = _room_for_bot(db, bot, rid)
     if room is None:
         return error("not found", 404)
-    row = db.get(Message.__sqlmodel__, mid)
-    if row is None or row.room_id != rid:
+    row = q.message_dict(db, mid)
+    if row is None or row["room_id"] != rid:
         return error("not found", 404)
     raw = request.get_data(as_text=True)
     data = request.get_json(silent=True)

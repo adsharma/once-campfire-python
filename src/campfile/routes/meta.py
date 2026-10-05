@@ -1,30 +1,40 @@
 """Bench discovery endpoint (ids and corpus scale)."""
 
 from flask import Blueprint, jsonify
-from sqlalchemy import func, text
-from sqlmodel import select
+from sqlalchemy import text
 
 from .. import state as st
-from ..db import Message, Room, User
+from campfile import fq as _fq
 
 bp = Blueprint("meta", __name__)
+
+
+def _count(db, qcls, alias):
+    rows = _fq.rows(db, qcls([]).count())
+    return rows[0]["COUNT(*)"] if rows else 0
+
+
+def _first_id(db, qcls, alias):
+    rows = _fq.rows(db, qcls([]).order_by(_fq.order(alias + ".id"))
+                    .take(1).project([alias + ".id"]))
+    return rows[0]["id"] if rows else 0
 
 
 @bp.get("/__meta")
 def meta():
     db = st.get_db()
-    wc = db.exec(select(Room.__sqlmodel__.id).order_by(Room.__sqlmodel__.id)).first()
-    uid = db.exec(select(User.__sqlmodel__.id).order_by(User.__sqlmodel__.id)).first()
-    total = db.exec(select(func.count(Message.__sqlmodel__.id))).one()
-    mid = db.exec(select(Message.__sqlmodel__.id).order_by(Message.__sqlmodel__.id)
-                  .offset(total // 2)).first()
+    from campfile.fq import MessageQuery, RoomQuery, UserQuery
+    total = _count(db, MessageQuery, "message")
+    mid = _fq.rows(db, MessageQuery([])
+                   .order_by(_fq.order("message.id"))
+                   .take(1).skip(total // 2).project(["message.id"]))
     fts = db.exec(text("SELECT count(*) FROM message_search_index")).one()[0]
     return jsonify({
-        "users": db.exec(select(func.count(User.__sqlmodel__.id))).one(),
-        "rooms": db.exec(select(func.count(Room.__sqlmodel__.id))).one(),
+        "users": _count(db, UserQuery, "user"),
+        "rooms": _count(db, RoomQuery, "room"),
         "messages": total,
         "fts_rows": fts,
-        "watercooler": wc,
-        "first_user": uid,
-        "busy_message": mid,
+        "watercooler": _first_id(db, RoomQuery, "room"),
+        "first_user": _first_id(db, UserQuery, "user"),
+        "busy_message": mid[0]["id"] if mid else 0,
     })

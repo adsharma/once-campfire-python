@@ -1,10 +1,11 @@
 """DB-backed hot paths + session auth (SQL mirrors of workload.py over Store).
 
-Same view dataclasses (bench JSON unchanged); same rules (membership
-scoping, 40/page pagination, unread fan-out, visibility). Enum strings
-live in the DB (Rails form); the int enums stay in Python views.
-Preloads batch creators/boosts/mentions in single IN queries, mirroring
-Rails' with_presentation preloads instead of N+1s.
+Reads are fquery chains: the query tree compiles to parameterized SQL
+(? placeholders, never interpolated text) executed on the session's own
+connection. Writes stay on db.exec / raw SQL. Same view dataclasses
+(bench JSON unchanged); same rules (membership scoping, 40/page
+pagination, unread fan-out, visibility). Enum strings live in the DB
+(Rails form); the int enums stay in Python views.
 
 Auth mirrors the Rails/Django session model: bcrypt password check on
 POST /session, a sessions row keyed by token, and a signed
@@ -13,18 +14,14 @@ Rails-compatible — see README for the boundary.
 """
 
 import secrets
-import time
 
-from sqlalchemy import func, text
-from sqlmodel import select
+from sqlalchemy import text
 
+from campfile import fq
 from campfile.db import (
     INVOLVEMENT_TO_ID,
     ROOM_TYPE_TO_KIND,
-    Boost,
-    Membership,
     Message,
-    MessageMention,
     RichText,
     Room,
     User,
@@ -43,54 +40,63 @@ from campfile.domain.workload import (
 
 PAGE_SIZE = 40
 
+MSG_COLS = ["message.id", "message.room_id", "message.creator_id",
+            "message.client_message_id", "message.created_at"]
+
 
 def _member(session, room_id: int, user_id: int) -> bool:
-    M = Membership.__sqlmodel__
-    row = session.exec(
-        select(M).where(M.room_id == room_id, M.user_id == user_id)
-    ).first()
-    return row is not None
+    rows = fq.rows(session, fq.MembershipQuery([])
+                   .where(fq.pred(
+                       'membership.room_id == param("rid")'
+                       ' and membership.user_id == param("uid")'))
+                   .take(1).project(["membership.id"]),
+                   {"rid": room_id, "uid": user_id})
+    return bool(rows)
 
 
 def _users_by_id(session, ids: list) -> dict:
-    U = User.__sqlmodel__
     out = {}
     if not ids:
         return out
-    for u in session.exec(select(U).where(U.id.in_(ids))).all():
-        out[u.id] = u.name
+    in_list = ",".join(str(int(i)) for i in ids)
+    rows = fq.rows(session, fq.UserQuery([])
+                   .where(fq.pred("user.id in [%s]" % in_list))
+                   .project(["user.id", "user.name"]))
+    for r in rows:
+        out[r["id"]] = r["name"]
     return out
 
 
 def _boosts_by_message(session, ids: list) -> dict:
-    B = Boost.__sqlmodel__
     out = {i: [] for i in ids}
     if not ids:
         return out
-    for b in session.exec(select(B).where(B.message_id.in_(ids))).all():
-        if b.message_id in out:
-            out[b.message_id].append(b.content)
+    in_list = ",".join(str(int(i)) for i in ids)
+    rows = fq.rows(session, fq.BoostQuery([])
+                   .where(fq.pred("boost.message_id in [%s]" % in_list))
+                   .project(["boost.message_id", "boost.content"]))
+    for r in rows:
+        if r["message_id"] in out:
+            out[r["message_id"]].append(r["content"])
     return out
 
 
 def _mentions_by_message(session, ids: list) -> dict:
-    MM = MessageMention.__sqlmodel__
-    U = User.__sqlmodel__
     out = {i: [] for i in ids}
     if not ids:
         return out
+    in_list = ",".join(str(int(i)) for i in ids)
     try:
-        rows = session.exec(
-            select(MM.message_id, U.name)
-            .join(U, U.id == MM.user_id)
-            .where(MM.message_id.in_(ids))
-        ).all()
+        rows = fq.rows(session, fq.MessageMentionQuery([])
+                       .edge("user", fq.JoinOn("user_id", "id"))
+                       .where(fq.pred("mm.message_id in [%s]" % in_list))
+                       .project(["mm.message_id", "user.name"]))
     except Exception:  # noqa: BLE001 - foreign schema without the table
         session.rollback()
         return out
-    for mid, name in rows:
-        if mid in out and name:
-            out[mid].append(name)
+    for r in rows:
+        if r["message_id"] in out and r["name"]:
+            out[r["message_id"]].append(r["name"])
     return out
 
 
@@ -106,47 +112,81 @@ def account_settings(account) -> dict:
 
 
 def _bodies_by_message(session, ids: list) -> dict:
-    RT = RichText.__sqlmodel__
     out = {}
     if not ids:
         return out
-    for r in session.exec(select(RT).where(
-        RT.record_id.in_(ids),
-        RT.name == "body",
-        RT.record_type.in_(["Message", "ActionText::RichText"]),
-    ).order_by(RT.id)).all():
-        out[r.record_id] = r.body or ""
+    in_list = ",".join(str(int(i)) for i in ids)
+    rows = fq.rows(session, fq.RichTextQuery([])
+                   .where(fq.pred(
+                       "rich.record_id in [%s] and rich.name == param(\"n\")"
+                       " and rich.record_type in [\"Message\","
+                       " \"ActionText::RichText\"]" % in_list))
+                   .order_by(fq.order("rich.id"))
+                   .project(["rich.record_id", "rich.body"]),
+                   {"n": "body"})
+    for r in rows:
+        out[r["record_id"]] = r["body"] or ""
     return out
 
 
-def message_view(session, m, names: dict, boosts: dict, mentions: dict,
+def message_dict(session, mid: int):
+    """One message as a dict, or None."""
+    rows = fq.rows(session, fq.MessageQuery([])
+                   .where(fq.pred('message.id == param("mid")'))
+                   .take(1).project(MSG_COLS),
+                   {"mid": mid})
+    return rows[0] if rows else None
+
+
+def message_view(m: dict, names: dict, boosts: dict, mentions: dict,
                  bodies: dict) -> MessageView:
     from campfile.domain import campfire as c
     v = MessageView()
-    v.id = m.id
-    v.body = bodies.get(m.id, "")
-    v.creator_id = m.creator_id
-    v.creator_name = names.get(m.creator_id, "")
-    v.created_at = m.created_at
-    v.client_message_id = m.client_message_id
+    v.id = m["id"]
+    v.body = bodies.get(m["id"], "")
+    v.creator_id = m["creator_id"]
+    v.creator_name = names.get(m["creator_id"], "")
+    v.created_at = m["created_at"]
+    v.client_message_id = m["client_message_id"]
     v.attachment_name = ""
     has_att = False
     snd = c.sound_command(v.body)
     v.content_type = c.content_type_name(c.content_type_of(has_att, snd))
-    v.boosts = boosts.get(m.id, [])
-    v.mentions = mentions.get(m.id, [])
+    v.boosts = boosts.get(m["id"], [])
+    v.mentions = mentions.get(m["id"], [])
     return v
 
 
 def views_for(session, msgs: list) -> list:
-    ids = [m.id for m in msgs]
-    creator_ids = list({m.creator_id for m in msgs})
+    ids = [m["id"] for m in msgs]
+    creator_ids = list({m["creator_id"] for m in msgs})
     names = _users_by_id(session, creator_ids)
     boosts = _boosts_by_message(session, ids)
     mentions = _mentions_by_message(session, ids)
     bodies = _bodies_by_message(session, ids)
-    return [message_view(session, m, names, boosts, mentions, bodies)
+    return [message_view(m, names, boosts, mentions, bodies)
             for m in msgs]
+
+
+def _page_window(session, room_id: int, op: str, anchor: dict, ascending: bool):
+    if ascending:
+        against = ('message.created_at > param("ts") or '
+                   '(message.created_at == param("ts")'
+                   ' and message.id > param("mid"))')
+        keys = "message.created_at, message.id"
+    else:
+        against = ('message.created_at < param("ts") or '
+                   '(message.created_at == param("ts")'
+                   ' and message.id < param("mid"))')
+        keys = "desc(message.created_at), desc(message.id)"
+    rows = fq.rows(session, fq.MessageQuery([])
+                   .where(fq.pred(
+                       'message.room_id == param("rid") and (%s)' % against))
+                   .order_by(fq.order(keys))
+                   .take(PAGE_SIZE).project(MSG_COLS),
+                   {"rid": room_id, "ts": anchor["created_at"],
+                    "mid": anchor["id"]})
+    return rows
 
 
 def room_page(session, room_id: int, user_id: int) -> RoomPageResult:
@@ -156,22 +196,21 @@ def room_page(session, room_id: int, user_id: int) -> RoomPageResult:
     room = session.get(R, room_id)
     if room is None:
         return RoomPageResult(ok=False, value=RoomPageView(), error="room not found")
-    M = Message.__sqlmodel__
-    rows = session.exec(
-        select(M)
-        .where(M.room_id == room_id)
-        .order_by(M.created_at.desc(), M.id.desc())
-        .limit(PAGE_SIZE)
-    ).all()
-    total = session.exec(
-        select(func.count(M.id)).where(M.room_id == room_id)
-    ).one()
+    rows = fq.rows(session, fq.MessageQuery([])
+                   .where(fq.pred('message.room_id == param("rid")'))
+                   .order_by(fq.order("desc(message.created_at), desc(message.id)"))
+                   .take(PAGE_SIZE).project(MSG_COLS),
+                   {"rid": room_id})
+    total = fq.rows(session, fq.MessageQuery([])
+                    .where(fq.pred('message.room_id == param("rid")'))
+                    .count(),
+                    {"rid": room_id})
     msgs = list(reversed(rows))
     view = RoomPageView()
     view.room_id = room.id
     view.room_name = room.name
     view.room_kind = ROOM_TYPE_TO_KIND.get(room.type, 1)
-    view.has_more = total > PAGE_SIZE
+    view.has_more = (total[0]["COUNT(*)"] if total else 0) > PAGE_SIZE
     view.messages = views_for(session, msgs)
     return RoomPageResult(ok=True, value=view, error="")
 
@@ -184,38 +223,24 @@ def messages_page(session, room_id: int, user_id: int, before_id: int, after_id:
         anchor = session.get(M, before_id)
         if anchor is None or anchor.room_id != room_id:
             return MessagesPageResult(ok=False, value=[], error="message not found")
-        rows = session.exec(
-            select(M)
-            .where(
-                M.room_id == room_id,
-                ((M.created_at < anchor.created_at)
-                 | ((M.created_at == anchor.created_at) & (M.id < anchor.id))),
-            )
-            .order_by(M.created_at.desc(), M.id.desc())
-            .limit(PAGE_SIZE)
-        ).all()
+        rows = _page_window(session, room_id, "<",
+                            {"created_at": anchor.created_at, "id": anchor.id},
+                            False)
         msgs = list(reversed(rows))
     elif after_id > 0:
         anchor = session.get(M, after_id)
         if anchor is None or anchor.room_id != room_id:
             return MessagesPageResult(ok=False, value=[], error="message not found")
-        msgs = list(session.exec(
-            select(M)
-            .where(
-                M.room_id == room_id,
-                ((M.created_at > anchor.created_at)
-                 | ((M.created_at == anchor.created_at) & (M.id > anchor.id))),
-            )
-            .order_by(M.created_at.asc(), M.id.asc())
-            .limit(PAGE_SIZE)
-        ).all())
+        msgs = _page_window(session, room_id, ">",
+                            {"created_at": anchor.created_at, "id": anchor.id},
+                            True)
     else:
-        rows = session.exec(
-            select(M)
-            .where(M.room_id == room_id)
-            .order_by(M.created_at.desc(), M.id.desc())
-            .limit(PAGE_SIZE)
-        ).all()
+        rows = fq.rows(session, fq.MessageQuery([])
+                       .where(fq.pred('message.room_id == param("rid")'))
+                       .order_by(fq.order(
+                           "desc(message.created_at), desc(message.id)"))
+                       .take(PAGE_SIZE).project(MSG_COLS),
+                       {"rid": room_id})
         msgs = list(reversed(rows))
     return MessagesPageResult(ok=True, value=views_for(session, msgs), error="")
 
@@ -224,22 +249,23 @@ def sidebar(session, user_id: int) -> SidebarResult:
     U = User.__sqlmodel__
     if session.get(U, user_id) is None:
         return SidebarResult(ok=False, value=[], error="user not found")
-    MM = Membership.__sqlmodel__
-    R = Room.__sqlmodel__
-    rows = session.exec(
-        select(MM, R)
-        .join(R, R.id == MM.room_id)
-        .where(MM.user_id == user_id, MM.involvement != "invisible")
-        .order_by(func.lower(R.name), R.id)
-    ).all()
+    rows = fq.rows(session, fq.MembershipQuery([])
+                   .where(fq.pred(
+                       'membership.user_id == param("uid")'
+                       ' and membership.involvement != param("inv")'))
+                   .edge("room", fq.JoinOn("room_id", "id"))
+                   .order_by(fq.order("lower(room.name), room.id"))
+                   .project(["membership.involvement", "membership.unread_at",
+                             "room.id", "room.name", "room.type"]),
+                   {"uid": user_id, "inv": "invisible"})
     out = []
-    for m, r in rows:
+    for r in rows:
         e = SidebarEntry()
-        e.room_id = r.id
-        e.room_name = r.name
-        e.room_kind = ROOM_TYPE_TO_KIND.get(r.type, 1)
-        e.unread = m.unread_at not in (None, 0)
-        e.involvement = INVOLVEMENT_TO_ID.get(m.involvement, 2)
+        e.room_id = r["id"]
+        e.room_name = r["name"]
+        e.room_kind = ROOM_TYPE_TO_KIND.get(r["type"], 1)
+        e.unread = r["unread_at"] not in (None, 0)
+        e.involvement = INVOLVEMENT_TO_ID.get(r["involvement"], 2)
         out.append(e)
     return SidebarResult(ok=True, value=out, error="")
 
@@ -252,63 +278,65 @@ def search_page(session, user_id: int, query: str, limit: int):
     # runs identically on indexed bodies and the query.
     if query.strip() == "":
         return SearchPageResult(ok=True, value=[], error="")
-    MM = Membership.__sqlmodel__
-    room_ids = list(session.exec(
-        select(MM.room_id).where(
-            MM.user_id == user_id,
-            MM.involvement != "invisible",
-        )
-    ).all())
+    room_rows = fq.rows(session, fq.MembershipQuery([])
+                        .where(fq.pred(
+                            'membership.user_id == param("uid")'
+                            ' and membership.involvement != param("inv")'))
+                        .project(["membership.room_id"]),
+                        {"uid": user_id, "inv": "invisible"})
+    room_ids = [r["room_id"] for r in room_rows]
     if not room_ids:
         return SearchPageResult(ok=True, value=[], error="")
-    M = Message.__sqlmodel__
-    placeholders = ", ".join(str(r) for r in room_ids)
-    sql = (
-        "SELECT messages.* FROM messages "
-        "JOIN message_search_index ON messages.id = message_search_index.rowid "
-        "WHERE message_search_index MATCH :q AND messages.room_id IN (%s) "
-        "ORDER BY messages.created_at LIMIT :n" % placeholders
-    )
+    in_list = ",".join(str(int(i)) for i in room_ids)
     try:
-        rows = session.exec(
-            text(sql).bindparams(q=query.strip(), n=limit)).mappings().all()
+        rows = fq.rows(session, fq.FTSQuery([])
+                       .edge("messages", fq.JoinOn("rowid", "id"))
+                       .where(fq.pred(
+                           "match(idx.body, param(\"q\"))"
+                           " and message.room_id in [%s]" % in_list))
+                       .order_by(fq.order("message.created_at"))
+                       .take(limit)
+                       .project(["message.id", "message.room_id",
+                                 "message.creator_id",
+                                 "message.client_message_id",
+                                 "message.created_at"]),
+                       {"q": query.strip()})
     except Exception:  # noqa: BLE001 - FTS5 syntax in user input
         session.rollback()
         return SearchPageResult(ok=True, value=[], error="")
-    R = Room.__sqlmodel__
-    names = {r.id: r.name for r in session.exec(select(R)).all()}
-    msgs = []
-    for row in rows:
-        m = M(
-            id=row["id"], room_id=row["room_id"],
-            creator_id=row["creator_id"],
-            client_message_id=row["client_message_id"],
-            created_at=row["created_at"],
-        )
-        msgs.append(m)
-    views = views_for(session, msgs)
+    name_rows = fq.rows(session, fq.RoomQuery([]).project(["room.id", "room.name"]))
+    names = {r["id"]: r["name"] for r in name_rows}
+    views = views_for(session, rows)
     out = []
     for v in views:
         hit = SearchHitView()
         hit.message = v
-        mid_rows = [m for m in msgs if m.id == v.id]
+        mid_rows = [m for m in rows if m["id"] == v.id]
         if mid_rows:
-            hit.room_name = names.get(mid_rows[0].room_id, "")
+            hit.room_name = names.get(mid_rows[0]["room_id"], "")
         out.append(hit)
     return SearchPageResult(ok=True, value=out, error="")
+
+
+def _message_dict(row_id: int, room_id: int, creator_id: int,
+                  client_message_id: str, stamp) -> dict:
+    return {"id": row_id, "room_id": room_id, "creator_id": creator_id,
+            "client_message_id": client_message_id, "created_at": stamp}
 
 
 def post_message_view(session, room_id: int, creator_id: int, body: str,
                       client_message_id: str, now: int):
     from campfile.domain import campfire as c
     M = Message.__sqlmodel__
-    MM = Membership.__sqlmodel__
     if session.get(Room.__sqlmodel__, room_id) is None:
         return c.MessageResult(ok=False, error="room not found")
-    mem = session.exec(
-        select(MM).where(MM.room_id == room_id, MM.user_id == creator_id)
-    ).first()
-    if mem is None:
+    mem = fq.rows(session, fq.MembershipQuery([])
+                  .where(fq.pred(
+                      'membership.room_id == param("rid")'
+                      ' and membership.user_id == param("uid")'))
+                  .take(1).project(["membership.id"]),
+                  {"rid": room_id, "uid": creator_id})
+    if not mem:
         return c.MessageResult(ok=False, error="creator is not a room member")
     if body == "":
         return c.MessageResult(ok=False, error="body or attachment is required")
@@ -339,7 +367,9 @@ def post_message_view(session, room_id: int, creator_id: int, body: str,
     )
     session.commit()
     session.refresh(row)
-    return c.MessageResult(ok=True, value=row)
+    value = _message_dict(row.id, room_id, creator_id,
+                          row.client_message_id, stamp)
+    return c.MessageResult(ok=True, value=value)
 
 
 # ---------------------------------------------------------------------------
@@ -350,22 +380,28 @@ SESSION_TTL_REFRESH = 3600
 
 
 def authenticate(session, email: str, password: str):
-    """Return the user row when email+bcrypt verify and status allows."""
+    """Return the user dict when email+bcrypt verify and status allows."""
     import bcrypt
-    U = User.__sqlmodel__
-    row = session.exec(
-        select(U).where(U.email_address == email)
-    ).first()
-    if row is None or not row.password_digest:
+    rows = fq.rows(session, fq.UserQuery([])
+                   .where(fq.pred('user.email_address == param("email")'))
+                   .take(1)
+                   .project(["user.id", "user.name", "user.email_address",
+                             "user.password_digest", "user.role",
+                             "user.status", "user.bio"]),
+                   {"email": email})
+    if not rows:
+        return None
+    row = rows[0]
+    if not row["password_digest"]:
         return None
     try:
         ok = bcrypt.checkpw(password.encode("utf-8"),
-                            row.password_digest.encode("utf-8"))
+                            row["password_digest"].encode("utf-8"))
     except ValueError:
         return None
     if not ok:
         return None
-    if row.status != 0:
+    if row["status"] != 0:
         return None
     return row
 
@@ -388,7 +424,14 @@ def user_from_token(session, token: str, now: int):
         return None
     S = UserSession.__sqlmodel__
     U = User.__sqlmodel__
-    row = session.exec(select(S).where(S.token == token)).first()
+    found = fq.rows(session, fq.UserSessionQuery([])
+                    .where(fq.pred('sess.token == param("tok")'))
+                    .take(1).project(["sess.id", "sess.user_id",
+                                      "sess.last_active_at"]),
+                    {"tok": token})
+    if not found:
+        return None
+    row = session.get(S, found[0]["id"])
     if row is None:
         return None
     from campfile.db import from_db_time as _e, to_db_time as _t2
@@ -406,7 +449,12 @@ def user_from_token(session, token: str, now: int):
 
 def end_session(session, token: str) -> None:
     S = UserSession.__sqlmodel__
-    row = session.exec(select(S).where(S.token == token)).first()
-    if row is not None:
-        session.delete(row)
-        session.commit()
+    found = fq.rows(session, fq.UserSessionQuery([])
+                    .where(fq.pred('sess.token == param("tok")'))
+                    .take(1).project(["sess.id"]),
+                    {"tok": token})
+    if found:
+        row = session.get(S, found[0]["id"])
+        if row is not None:
+            session.delete(row)
+            session.commit()

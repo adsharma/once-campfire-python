@@ -99,9 +99,9 @@ with Session(engine) as db:
                                  int(_time.time()))
     check("post", posted.ok)
     sp2 = q.search_page(db, 2, "coffee", 20)
-    check("post searchable", {h.message.id for h in sp2.value} >= {1, posted.value.id})
+    check("post searchable", {h.message.id for h in sp2.value} >= {1, posted.value["id"]})
 
-    mp = q.messages_page(db, 1, 1, posted.value.id, 0)
+    mp = q.messages_page(db, 1, 1, posted.value["id"], 0)
     check("page before post", mp.ok and
           [m.id for m in mp.value] == [1, 2])
 

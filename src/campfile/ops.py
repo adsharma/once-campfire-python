@@ -11,21 +11,20 @@ mirrored (see README boundaries).
 
 import json
 import secrets
-import time
 
 import bcrypt
-from sqlalchemy import func, text
-from sqlmodel import select
+from sqlalchemy import text
+
+from campfile import fq as _fq
 
 from campfile.db import (
-    INVOLVEMENT_TO_ID,
+    
     ROOM_KIND_TO_TYPE,
     Account,
     Ban,
     Boost,
     Membership,
     Message,
-    MessageMention,
     PushSubscription,
     RichText,
     Room,
@@ -33,7 +32,6 @@ from campfile.db import (
     User,
     UserSession,
     Webhook,
-    from_db_time,
     to_db_time,
 )
 
@@ -47,11 +45,15 @@ def room_access(db, uid: int, rid: int):
     room = db.get(R, rid)
     if room is None:
         return None, None
-    mem = db.exec(select(M).where(M.room_id == rid,
-                                 M.user_id == uid)).first()
-    if mem is None:
+    mem = _fq.rows(db, _fq.MembershipQuery([])
+                     .where(_fq.pred(
+                         'membership.room_id == param("rid")'
+                         ' and membership.user_id == param("uid")'))
+                     .take(1).project(["membership.id"]),
+                     {"rid": rid, "uid": uid})
+    if not mem:
         return None, None
-    return room, mem
+    return room, db.get(M, mem[0]["id"])
 
 
 def bot_auth(db, key: str):
@@ -79,10 +81,19 @@ def hash_password(password: str) -> str:
 def grant_open_rooms(db, user_id: int):
     R = Room.__sqlmodel__
     M = Membership.__sqlmodel__
-    for room in db.exec(select(R).where(R.type == "Rooms::Open")).all():
-        if db.exec(select(func.count(M.id)).where(
-                M.room_id == room.id, M.user_id == user_id)).one() == 0:
-            db.add(M(room_id=room.id, user_id=user_id,
+    rooms = _fq.rows(db, _fq.RoomQuery([])
+                     .where(_fq.pred('room.type == param("t")'))
+                     .project(["room.id"]),
+                     {"t": "Rooms::Open"})
+    for room in rooms:
+        have = _fq.rows(db, _fq.MembershipQuery([])
+                         .where(_fq.pred(
+                             'membership.room_id == param("rid")'
+                             ' and membership.user_id == param("uid")'))
+                         .count(),
+                         {"rid": room["id"], "uid": user_id})
+        if not have or have[0]["COUNT(*)"] == 0:
+            db.add(M(room_id=room["id"], user_id=user_id,
                      involvement="mentions"))
 
 
@@ -137,15 +148,29 @@ def deactivate_user(db, row, now: int):
     M = Membership.__sqlmodel__
     R = Room.__sqlmodel__
     stamp = to_db_time(now)
-    for mem in db.exec(select(M).where(M.user_id == row.id)).all():
-        room = db.get(R, mem.room_id)
+    mems = _fq.rows(db, _fq.MembershipQuery([])
+                       .where(_fq.pred('membership.user_id == param("uid")'))
+                       .project(["membership.id", "membership.room_id"]),
+                       {"uid": row.id})
+    for mem in mems:
+        room = db.get(R, mem["room_id"])
         if room is not None and room.type != "Rooms::Direct":
-            db.delete(mem)
-    for model in (PushSubscription, SearchRecord, UserSession):
+            old = db.get(M, mem["id"])
+            if old is not None:
+                db.delete(old)
+    for model, qcls in ((PushSubscription, _fq.PushSubscriptionQuery),
+                         (SearchRecord, _fq.SearchRecordQuery),
+                         (UserSession, _fq.UserSessionQuery)):
         T = model.__sqlmodel__
-        col = T.user_id if hasattr(T, "user_id") else T.user
-        for old in db.exec(select(T).where(col == row.id)).all():
-            db.delete(old)
+        prefix = _fq.alias(qcls)
+        olds = _fq.rows(db, qcls([])
+                         .where(_fq.pred('%s.user_id == param("uid")' % prefix))
+                         .project(["%s.id" % prefix]),
+                         {"uid": row.id})
+        for old in olds:
+            gone = db.get(T, old["id"])
+            if gone is not None:
+                db.delete(gone)
     row.status = 1
     if row.email_address:
         row.email_address = row.email_address.replace(
@@ -163,11 +188,19 @@ def create_room(db, kind: int, name, creator_id: int, member_ids: list,
     stamp = to_db_time(now)
     if kind == c.ROOM_DIRECT:
         wanted = set(member_ids) | {creator_id}
-        for cand in db.exec(select(R).where(R.type == "Rooms::Direct")).all():
-            have = {m.user_id for m in db.exec(
-                select(M).where(M.room_id == cand.id)).all()}
+        cands = _fq.rows(db, _fq.RoomQuery([])
+                         .where(_fq.pred('room.type == param("t")'))
+                         .project(["room.id"]),
+                         {"t": "Rooms::Direct"})
+        for cand in cands:
+            have = {m["user_id"] for m in _fq.rows(
+                db, _fq.MembershipQuery([])
+                .where(_fq.pred('membership.room_id == param("rid")'))
+                .project(["membership.user_id"]),
+                {"rid": cand["id"]})}
             if have == wanted:
-                return cand
+                found = db.get(R, cand["id"])
+                return {"id": found.id} if found is not None else None
         name = None
     row = R(name=name, type=ROOM_KIND_TO_TYPE[kind], creator_id=creator_id,
             created_at=stamp, updated_at=stamp)
@@ -178,7 +211,7 @@ def create_room(db, kind: int, name, creator_id: int, member_ids: list,
     for uid in (set(member_ids) | {creator_id}):
         db.add(M(room_id=row.id, user_id=uid, involvement=involve))
     db.commit()
-    return row
+    return {"id": row.id}
 
 
 def revise_room(db, room, name, kind: int, member_ids, is_open_kind: bool,
@@ -192,15 +225,25 @@ def revise_room(db, room, name, kind: int, member_ids, is_open_kind: bool,
     room.updated_at = to_db_time(now)
     db.add(room)
     if is_open_kind:
-        wanted = {u.id for u in db.exec(
-            select(U).where(U.status == 0)).all()}
+        actives = _fq.rows(db, _fq.UserQuery([])
+                           .where(_fq.pred("user.status == 0"))
+                           .project(["user.id"]))
+        wanted = {u["id"] for u in actives}
     else:
         wanted = set(member_ids)
-    for mem in db.exec(select(M).where(M.room_id == room.id)).all():
-        if mem.user_id not in wanted:
-            db.delete(mem)
-    have = {m.user_id for m in db.exec(
-        select(M).where(M.room_id == room.id)).all()}
+    for mem in _fq.rows(db, _fq.MembershipQuery([])
+                        .where(_fq.pred('membership.room_id == param("rid")'))
+                        .project(["membership.id", "membership.user_id"]),
+                        {"rid": room.id}):
+        if mem["user_id"] not in wanted:
+            old = db.get(M, mem["id"])
+            if old is not None:
+                db.delete(old)
+    have = {m["user_id"] for m in _fq.rows(
+        db, _fq.MembershipQuery([])
+        .where(_fq.pred('membership.room_id == param("rid")'))
+        .project(["membership.user_id"]),
+        {"rid": room.id})}
     involve = ("everything" if room.type == "Rooms::Direct" else "mentions")
     for uid in wanted - have:
         db.add(M(room_id=room.id, user_id=uid, involvement=involve))
@@ -211,12 +254,19 @@ def revise_room(db, room, name, kind: int, member_ids, is_open_kind: bool,
 def delete_room_cascade(db, room_id: int):
     M = Membership.__sqlmodel__
     R = Room.__sqlmodel__
-    rows = db.exec(select(Message.__sqlmodel__).where(
-        Message.__sqlmodel__.room_id == room_id)).all()
+    rows = _fq.rows(db, _fq.MessageQuery([])
+                    .where(_fq.pred('message.room_id == param("rid")'))
+                    .project(["message.id"]),
+                    {"rid": room_id})
     for m in rows:
-        delete_message_cascade(db, m.id)
-    for mem in db.exec(select(M).where(M.room_id == room_id)).all():
-        db.delete(mem)
+        delete_message_cascade(db, m["id"])
+    for mem in _fq.rows(db, _fq.MembershipQuery([])
+                        .where(_fq.pred('membership.room_id == param("rid")'))
+                        .project(["membership.id"]),
+                        {"rid": room_id}):
+        old = db.get(M, mem["id"])
+        if old is not None:
+            db.delete(old)
     room = db.get(R, room_id)
     if room is not None:
         db.delete(room)
@@ -238,9 +288,14 @@ def touch_room(db, room_id: int, now: int):
 def update_message_body(db, mid: int, body: str, now: int) -> bool:
     RT = RichText.__sqlmodel__
     stamp = to_db_time(now)
-    rich = db.exec(select(RT).where(
-        RT.record_type == "Message", RT.record_id == mid,
-        RT.name == "body")).first()
+    found = _fq.rows(db, _fq.RichTextQuery([])
+                     .where(_fq.pred(
+                         'rich.record_type == param("t")'
+                         ' and rich.record_id == param("mid")'
+                         ' and rich.name == param("n")'))
+                     .take(1).project(["rich.id"]),
+                     {"t": "Message", "mid": mid, "n": "body"})
+    rich = db.get(RT, found[0]["id"]) if found else None
     if rich is None:
         db.add(RT(record_type="Message", record_id=mid, name="body",
                   body=body, created_at=stamp, updated_at=stamp))
@@ -258,12 +313,22 @@ def delete_message_cascade(db, mid: int):
     B = Boost.__sqlmodel__
     RT = RichText.__sqlmodel__
     M = Message.__sqlmodel__
-    for b in db.exec(select(B).where(B.message_id == mid)).all():
-        db.delete(b)
-    for rich in db.exec(select(RT).where(
-            RT.record_type == "Message",
-            RT.record_id == mid)).all():
-        db.delete(rich)
+    for b in _fq.rows(db, _fq.BoostQuery([])
+                       .where(_fq.pred('boost.message_id == param("mid")'))
+                       .project(["boost.id"]),
+                       {"mid": mid}):
+        old_b = db.get(B, b["id"])
+        if old_b is not None:
+            db.delete(old_b)
+    for rich in _fq.rows(db, _fq.RichTextQuery([])
+                         .where(_fq.pred(
+                             'rich.record_type == param("t")'
+                             ' and rich.record_id == param("mid")'))
+                         .project(["rich.id"]),
+                         {"t": "Message", "mid": mid}):
+        old_r = db.get(RT, rich["id"])
+        if old_r is not None:
+            db.delete(old_r)
     row = db.get(M, mid)
     if row is not None:
         room_id = row.room_id
@@ -293,8 +358,16 @@ def create_boost(db, mid: int, uid: int, content: str, now: int):
 
 def delete_boost(db, bid: int, mid: int, uid: int) -> bool:
     B = Boost.__sqlmodel__
-    row = db.exec(select(B).where(B.id == bid, B.message_id == mid,
-                                 B.booster_id == uid)).first()
+    found = _fq.rows(db, _fq.BoostQuery([])
+                     .where(_fq.pred(
+                         'boost.id == param("bid")'
+                         ' and boost.message_id == param("mid")'
+                         ' and boost.booster_id == param("uid")'))
+                     .take(1).project(["boost.id"]),
+                     {"bid": bid, "mid": mid, "uid": uid})
+    if not found:
+        return False
+    row = db.get(B, found[0]["id"])
     if row is None:
         return False
     db.delete(row)
@@ -306,17 +379,27 @@ def record_search(db, uid: int, query: str, now: int):
     from campfile.domain import campfire as c
     S = SearchRecord.__sqlmodel__
     stamp = to_db_time(now)
-    row = db.exec(select(S).where(S.user_id == uid,
-                                 S.query == query)).first()
-    if row is None:
+    found = _fq.rows(db, _fq.SearchRecordQuery([])
+                     .where(_fq.pred(
+                         'search.user_id == param("uid")'
+                         ' and search.query == param("q")'))
+                     .take(1).project(["search.id"]),
+                     {"uid": uid, "q": query})
+    if not found:
         db.add(S(user_id=uid, query=query, created_at=stamp,
                  updated_at=stamp))
     else:
-        row.updated_at = stamp
-        db.add(row)
+        row = db.get(S, found[0]["id"])
+        if row is not None:
+            row.updated_at = stamp
+            db.add(row)
     db.commit()
-    ids = [r.id for r in db.exec(select(S).where(S.user_id == uid).order_by(
-        text("updated_at DESC"))).all()]
+    ids = [r["id"] for r in _fq.rows(
+        db, _fq.SearchRecordQuery([])
+        .where(_fq.pred('search.user_id == param("uid")'))
+        .order_by(_fq.order("desc(search.updated_at)"))
+        .project(["search.id"]),
+        {"uid": uid})]
     for stale in ids[c.MAX_RECENT_SEARCHES:]:
         old = db.get(S, stale)
         if old is not None:
@@ -326,15 +409,23 @@ def record_search(db, uid: int, query: str, now: int):
 
 def clear_searches(db, uid: int):
     S = SearchRecord.__sqlmodel__
-    for row in db.exec(select(S).where(S.user_id == uid)).all():
-        db.delete(row)
+    for r in _fq.rows(db, _fq.SearchRecordQuery([])
+                      .where(_fq.pred('search.user_id == param("uid")'))
+                      .project(["search.id"]),
+                      {"uid": uid}):
+        row = db.get(S, r["id"])
+        if row is not None:
+            db.delete(row)
     db.commit()
 
 
 def recent_searches(db, uid: int) -> list:
-    S = SearchRecord.__sqlmodel__
-    return [r.query for r in db.exec(select(S).where(
-        S.user_id == uid).order_by(text("updated_at DESC")).limit(10)).all()]
+    return [r["query"] for r in _fq.rows(
+        db, _fq.SearchRecordQuery([])
+        .where(_fq.pred('search.user_id == param("uid")'))
+        .order_by(_fq.order("desc(search.updated_at)"))
+        .take(10).project(["search.query"]),
+        {"uid": uid})]
 
 
 def pushsub_upsert(db, uid: int, endpoint: str, p256dh: str, auth: str,
@@ -343,8 +434,13 @@ def pushsub_upsert(db, uid: int, endpoint: str, p256dh: str, auth: str,
     if not (endpoint or "").strip():
         return None
     stamp = to_db_time(now)
-    row = db.exec(select(P).where(P.user_id == uid,
-                                 P.endpoint == endpoint)).first()
+    found = _fq.rows(db, _fq.PushSubscriptionQuery([])
+                     .where(_fq.pred(
+                         'push.user_id == param("uid")'
+                         ' and push.endpoint == param("ep")'))
+                     .take(1).project(["push.id"]),
+                     {"uid": uid, "ep": endpoint})
+    row = db.get(P, found[0]["id"]) if found else None
     if row is None:
         row = P(user_id=uid, endpoint=endpoint, p256dh_key=p256dh or "",
                 auth_key=auth or "", user_agent=agent or "",
@@ -361,14 +457,23 @@ def pushsub_upsert(db, uid: int, endpoint: str, p256dh: str, auth: str,
 
 
 def pushsub_list(db, uid: int) -> list:
-    P = PushSubscription.__sqlmodel__
-    return db.exec(select(P).where(P.user_id == uid)).all()
+    return _fq.rows(db, _fq.PushSubscriptionQuery([])
+                    .where(_fq.pred('push.user_id == param("uid")'))
+                    .project(["push.id", "push.endpoint", "push.user_agent"]),
+                    {"uid": uid})
 
 
 def pushsub_delete(db, uid: int, sid: int) -> bool:
     P = PushSubscription.__sqlmodel__
-    row = db.exec(select(P).where(P.id == sid,
-                                 P.user_id == uid)).first()
+    found = _fq.rows(db, _fq.PushSubscriptionQuery([])
+                     .where(_fq.pred(
+                         'push.id == param("sid")'
+                         ' and push.user_id == param("uid")'))
+                     .take(1).project(["push.id"]),
+                     {"sid": sid, "uid": uid})
+    if not found:
+        return False
+    row = db.get(P, found[0]["id"])
     if row is None:
         return False
     db.delete(row)
@@ -378,7 +483,10 @@ def pushsub_delete(db, uid: int, sid: int) -> bool:
 
 def account_row(db):
     A = Account.__sqlmodel__
-    return db.exec(select(A)).first()
+    found = _fq.rows(db, _fq.AccountQuery([]).take(1).project(["account.id"]))
+    if not found:
+        return None
+    return db.get(A, found[0]["id"])
 
 
 def update_account(db, row, name, settings: dict, now: int):
@@ -413,13 +521,22 @@ def ban_user(db, row, now: int) -> int:
     S = UserSession.__sqlmodel__
     B = Ban.__sqlmodel__
     stamp = to_db_time(now)
-    ips = {s.ip_address for s in db.exec(
-        select(S).where(S.user_id == row.id)).all()
-        if s.ip_address}
-    for s in db.exec(select(S).where(S.user_id == row.id)).all():
-        db.delete(s)
-    for old in db.exec(select(B).where(B.user_id == row.id)).all():
-        db.delete(old)
+    sess = _fq.rows(db, _fq.UserSessionQuery([])
+                    .where(_fq.pred('sess.user_id == param("uid")'))
+                    .project(["sess.id", "sess.ip_address"]),
+                    {"uid": row.id})
+    ips = {x["ip_address"] for x in sess if x["ip_address"]}
+    for x in sess:
+        old_s = db.get(S, x["id"])
+        if old_s is not None:
+            db.delete(old_s)
+    for old in _fq.rows(db, _fq.BanQuery([])
+                        .where(_fq.pred('ban.user_id == param("uid")'))
+                        .project(["ban.id"]),
+                        {"uid": row.id}):
+        gone = db.get(B, old["id"])
+        if gone is not None:
+            db.delete(gone)
     for ip in ips:
         db.add(B(user_id=row.id, ip_address=ip, created_at=stamp,
                  updated_at=stamp))
@@ -432,8 +549,13 @@ def ban_user(db, row, now: int) -> int:
 
 def unban_user(db, row, now: int):
     B = Ban.__sqlmodel__
-    for old in db.exec(select(B).where(B.user_id == row.id)).all():
-        db.delete(old)
+    for old in _fq.rows(db, _fq.BanQuery([])
+                        .where(_fq.pred('ban.user_id == param("uid")'))
+                        .project(["ban.id"]),
+                        {"uid": row.id}):
+        gone = db.get(B, old["id"])
+        if gone is not None:
+            db.delete(gone)
     row.status = 0
     row.updated_at = to_db_time(now)
     db.add(row)
@@ -442,7 +564,11 @@ def unban_user(db, row, now: int):
 
 def bot_upsert_webhook(db, bot_id: int, url: str, now: int):
     W = Webhook.__sqlmodel__
-    row = db.exec(select(W).where(W.user_id == bot_id)).first()
+    found = _fq.rows(db, _fq.WebhookQuery([])
+                     .where(_fq.pred('webhook.user_id == param("uid")'))
+                     .take(1).project(["webhook.id"]),
+                     {"uid": bot_id})
+    row = db.get(W, found[0]["id"]) if found else None
     if url:
         if row is None:
             row = W(user_id=bot_id, url=url,
@@ -458,9 +584,11 @@ def bot_upsert_webhook(db, bot_id: int, url: str, now: int):
 
 
 def bot_webhook(db, bot_id: int) -> str:
-    W = Webhook.__sqlmodel__
-    row = db.exec(select(W).where(W.user_id == bot_id)).first()
-    return row.url if row is not None else ""
+    found = _fq.rows(db, _fq.WebhookQuery([])
+                     .where(_fq.pred('webhook.user_id == param("uid")'))
+                     .take(1).project(["webhook.url"]),
+                     {"uid": bot_id})
+    return found[0]["url"] if found else ""
 
 
 def first_run_create(db, name: str, email: str, password: str, now: int):

@@ -78,13 +78,13 @@ with Session(engine) as db:
     import time as _time
     res = q.post_message_view(db, gid, uid, "hello coffee world", "db1",
                               int(_time.time()))
-    check("post ok", res.ok and res.value.client_message_id == "db1")
+    check("post ok", res.ok and res.value["client_message_id"] == "db1")
     from campfile.db import RichText
     bodies = {r.record_id: r.body for r in db.exec(select(RichText.__sqlmodel__)).all()
               if r.name == "body"}
-    check("post body", bodies.get(res.value.id) == "hello coffee world")
+    check("post body", bodies.get(res.value["id"]) == "hello coffee world")
     got7 = q.search_page(db, uid, "hello", 20)
-    check("post indexed", any(h.message.id == res.value.id for h in got7.value))
+    check("post indexed", any(h.message.id == res.value["id"] for h in got7.value))
     from campfile.db import Membership
     others = db.exec(select(Membership.__sqlmodel__).where(
         Membership.__sqlmodel__.room_id == gid)).all()
@@ -93,7 +93,7 @@ with Session(engine) as db:
     check("unread fanned", len(marked) == len(others) - 1)
 
     # --- triggers --------------------------------------------------------------
-    mid = res.value.id
+    mid = res.value["id"]
     row = db.get(Message.__sqlmodel__, mid)
     rt = db.exec(select(RichText.__sqlmodel__).where(
         RichText.__sqlmodel__.record_type == "Message",

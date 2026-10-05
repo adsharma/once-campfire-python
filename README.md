@@ -190,6 +190,7 @@ created from their `schema.sql`) and `tests/test_auth.py` (20 flow checks).
 | Area | Status |
 |---|---|
 | Tables/columns | same names for all Rails tables; string `involvement`/`type`, `email_address`, `password_digest`, porter FTS + triggers |
+| Reads | fquery chains (`campfile/fq.py` bindings) compiling to parameterized SQL; writes stay on `db.exec`/raw SQL; PK lookups stay on `session.get` |
 | Bodies | `action_text_rich_texts` like Rails/Django (record `Message`, legacy `ActionText::RichText` accepted) |
 | Timestamps | integer epoch in, ISO datetime text out (Rails form); mixed-representation DBs order correctly, arithmetic coerces |
 | Sessions | bcrypt login, token rows, throttled touch, signed `session_token` cookie; banned/deactivated rejected |

@@ -9,11 +9,9 @@ import secrets
 import time
 
 from flask import Blueprint, jsonify, request
-from sqlalchemy import func
-from sqlmodel import select
 
 from campfile import queries as q
-from campfile.db import Membership, Room, User, to_db_time
+from campfile.db import User, to_db_time
 from campfile.domain import campfire as c
 from campfile import ops
 from campfile.routes.helpers import actor_or_login, db_session, error, login_redirect
@@ -29,8 +27,9 @@ def _admin(db, uid: int):
 
 
 def _user_json(u):
-    return {"id": u.id, "name": u.name, "email_address": u.email_address,
-            "role": u.role, "status": u.status}
+    return {"id": u["id"], "name": u["name"],
+            "email_address": u["email_address"],
+            "role": u["role"], "status": u["status"]}
 
 
 @bp.get("/account")
@@ -43,15 +42,21 @@ def account_show():
     account = ops.account_row(db)
     if account is None:
         return error("not found", 404)
-    U = User.__sqlmodel__
-    query = select(U).where(U.role != c.ROLE_BOT)
+    from campfile import fq as _fq
     if me.role != c.ROLE_ADMIN:
-        query = query.where(U.status == 0)
+        status_pred = "user.status == 0"
     else:
-        query = query.where(U.status.in_([0, 2]))
-    users = db.exec(query.order_by(func.lower(U.name)).limit(500)).all()
-    admins = [_user_json(u) for u in users if u.role == c.ROLE_ADMIN]
-    members = [_user_json(u) for u in users if u.role != c.ROLE_ADMIN]
+        status_pred = "user.status in [0, 2]"
+    users = _fq.rows(db, _fq.UserQuery([])
+                     .where(_fq.pred(
+                         'user.role != param("bot") and (%s)' % status_pred))
+                     .order_by(_fq.order("lower(user.name)"))
+                     .take(500)
+                     .project(["user.id", "user.name", "user.email_address",
+                               "user.role", "user.status"]),
+                     {"bot": c.ROLE_BOT})
+    admins = [_user_json(u) for u in users if u["role"] == c.ROLE_ADMIN]
+    members = [_user_json(u) for u in users if u["role"] != c.ROLE_ADMIN]
     return jsonify({
         "name": account.name,
         "join_url": "/join/" + (account.join_code or ""),
@@ -117,19 +122,24 @@ def bots_list():
     db = db_session()
     if _admin(db, uid) is None:
         return error("forbidden", 403)
-    U = User.__sqlmodel__
+    from campfile import fq as _fq
     out = []
-    for bot in db.exec(select(U).where(U.role == c.ROLE_BOT,
-                                      U.status == 0).order_by(
-            func.lower(U.name))).all():
-        rooms = [{"id": r.id, "name": r.name} for r in db.exec(
-            select(Room.__sqlmodel__).join(
-                Membership.__sqlmodel__,
-                Membership.__sqlmodel__.room_id == Room.__sqlmodel__.id
-            ).where(Membership.__sqlmodel__.user_id == bot.id)).all()]
-        out.append({"id": bot.id, "name": bot.name,
-                    "key": c.bot_key_of(bot.id, bot.bot_token or ""),
-                    "webhook": ops.bot_webhook(db, bot.id), "rooms": rooms})
+    bots = _fq.rows(db, _fq.UserQuery([])
+                    .where(_fq.pred(
+                        'user.role == param("bot") and user.status == 0'))
+                    .order_by(_fq.order("lower(user.name)"))
+                    .project(["user.id", "user.name", "user.bot_token"]),
+                    {"bot": c.ROLE_BOT})
+    for bot in bots:
+        rooms = [{"id": r["id"], "name": r["name"]} for r in _fq.rows(
+            db, _fq.RoomWithMembershipsQuery([])
+            .edge("memberships", _fq.JoinOn("id", "room_id"))
+            .where(_fq.pred('membership.user_id == param("uid")'))
+            .project(["room.id", "room.name"]),
+            {"uid": bot["id"]})]
+        out.append({"id": bot["id"], "name": bot["name"],
+                    "key": c.bot_key_of(bot["id"], bot["bot_token"] or ""),
+                    "webhook": ops.bot_webhook(db, bot["id"]), "rooms": rooms})
     return jsonify(out)
 
 

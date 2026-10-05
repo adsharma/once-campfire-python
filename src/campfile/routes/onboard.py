@@ -8,13 +8,12 @@ covers the same flow.
 import time
 
 from flask import Blueprint, jsonify, redirect, request
-from sqlmodel import select
 
 from campfile.db import Account, Room, User
 from campfile.domain import campfire as c
 from campfile import ops
 from campfile.routes import session as session_routes
-from campfile.routes.helpers import actor_or_login, db_session, error, login_redirect
+from campfile.routes.helpers import actor_or_login, db_session, error
 
 bp = Blueprint("onboard", __name__)
 
@@ -27,14 +26,15 @@ def welcome():
     uid = actor_or_login()
     if uid is None:
         return redirect("/session/new")
-    R = Room.__sqlmodel__
-    from campfile.db import Membership
-    M = Membership.__sqlmodel__
-    first = db.exec(select(R).join(
-        M, M.room_id == R.id).where(
-            M.user_id == uid).order_by(R.created_at).limit(1)).all()
+    from campfile import fq as _fq
+    first = _fq.rows(db, _fq.RoomWithMembershipsQuery([])
+                   .edge("memberships", _fq.JoinOn("id", "room_id"))
+                   .where(_fq.pred('membership.user_id == param("uid")'))
+                   .order_by(_fq.order("room.created_at"))
+                   .take(1).project(["room.id"]),
+                   {"uid": uid})
     if first:
-        return redirect("/rooms/%d" % first[0].id)
+        return redirect("/rooms/%d" % first[0]["id"])
     return jsonify({"welcome": True})
 
 

@@ -9,10 +9,9 @@ and turbo streams.
 import time
 
 from flask import Blueprint, jsonify, request
-from sqlmodel import select
 
 from campfile import queries as q
-from campfile.db import Membership, Message, User
+from campfile.db import User
 from campfile.domain import campfire as c
 from campfile import ops
 from campfile.routes.helpers import actor_or_login, db_session, error, login_redirect, present, present_list
@@ -66,14 +65,18 @@ def room_create(kind):
         if not name:
             return error("name required", 422)
     else:
-        actives = [u.id for u in db.exec(select(User.__sqlmodel__).where(
-            User.__sqlmodel__.status == 0)).all()]
-        ids = actives
+        from campfile import fq as _fq
+        actives = _fq.rows(db, _fq.UserQuery([])
+                           .where(_fq.pred("user.status == 0"))
+                           .project(["user.id"]))
+        ids = [u["id"] for u in actives]
         if not name:
             return error("name required", 422)
     room = ops.create_room(db, KINDS[kind], name or None, uid, ids,
                            int(time.time()))
-    res = q.room_page(db, room.id, uid)
+    if room is None:
+        return error("unprocessable", 422)
+    res = q.room_page(db, room["id"], uid)
     if not res.ok:
         return error("not found", 404)
     return present(res.value), 201
@@ -166,15 +169,22 @@ def refresh(rid):
     room, _mem = ops.room_access(db, uid, rid)
     if room is None:
         return error("not found", 404)
-    M = Message.__sqlmodel__
-    new_rows = db.exec(select(M).where(
-        M.room_id == rid, M.created_at > stamp
-    ).order_by(M.created_at).limit(40)).all()
-    new_ids = [m.id for m in new_rows]
-    upd_rows = db.exec(select(M).where(
-        M.room_id == rid, M.updated_at > stamp
-    ).order_by(M.created_at.desc()).limit(40)).all()
-    upd_rows = [m for m in upd_rows if m.id not in set(new_ids)]
+    from campfile import fq as _fq
+    new_rows = _fq.rows(
+        db, _fq.MessageQuery([])
+        .where(_fq.pred('message.room_id == param("rid")'
+                        ' and message.created_at > param("ts")'))
+        .order_by(_fq.order("message.created_at"))
+        .take(40).project(q.MSG_COLS),
+        {"rid": rid, "ts": stamp})
+    new_ids = [m["id"] for m in new_rows]
+    upd_rows = [m for m in _fq.rows(
+        db, _fq.MessageQuery([])
+        .where(_fq.pred('message.room_id == param("rid")'
+                        ' and message.updated_at > param("ts")'))
+        .order_by(_fq.order("desc(message.created_at)"))
+        .take(40).project(q.MSG_COLS + ["message.updated_at"]),
+        {"rid": rid, "ts": stamp}) if m["id"] not in set(new_ids)]
     upd_rows.reverse()
     import dataclasses
     return jsonify({
@@ -216,8 +226,8 @@ def message_show(rid, mid):
     room, _mem = ops.room_access(db, uid, rid)
     if room is None:
         return error("not found", 404)
-    row = db.get(Message.__sqlmodel__, mid)
-    if row is None or row.room_id != rid:
+    row = q.message_dict(db, mid)
+    if row is None or row["room_id"] != rid:
         return error("not found", 404)
     return present(q.views_for(db, [row])[0])
 
@@ -231,11 +241,11 @@ def message_update(rid, mid):
     room, _mem = ops.room_access(db, uid, rid)
     if room is None:
         return error("not found", 404)
-    row = db.get(Message.__sqlmodel__, mid)
-    if row is None or row.room_id != rid:
+    row = q.message_dict(db, mid)
+    if row is None or row["room_id"] != rid:
         return error("not found", 404)
     me = db.get(User.__sqlmodel__, uid)
-    if not c.can_administer(me.role, uid, row.creator_id, False):
+    if not c.can_administer(me.role, uid, row["creator_id"], False):
         return error("forbidden", 403)
     data = request.get_json(silent=True) or {}
     body = data.get("body", data.get("message", {}).get("body")
@@ -243,8 +253,7 @@ def message_update(rid, mid):
     if body is None:
         return error("body required", 422)
     ops.update_message_body(db, mid, body, int(time.time()))
-    return present(q.views_for(db, [db.get(
-        Message.__sqlmodel__, mid)])[0])
+    return present(q.views_for(db, [q.message_dict(db, mid)])[0])
 
 
 @bp.delete("/rooms/<int:rid>/messages/<int:mid>")
@@ -256,11 +265,11 @@ def message_delete(rid, mid):
     room, _mem = ops.room_access(db, uid, rid)
     if room is None:
         return error("not found", 404)
-    row = db.get(Message.__sqlmodel__, mid)
-    if row is None or row.room_id != rid:
+    row = q.message_dict(db, mid)
+    if row is None or row["room_id"] != rid:
         return error("not found", 404)
     me = db.get(User.__sqlmodel__, uid)
-    if not c.can_administer(me.role, uid, row.creator_id, False):
+    if not c.can_administer(me.role, uid, row["creator_id"], False):
         return error("forbidden", 403)
     ops.delete_message_cascade(db, mid)
     return "", 204
@@ -272,18 +281,20 @@ def boost_list(mid):
     if uid is None:
         return login_redirect()
     db = db_session()
-    row = db.get(Message.__sqlmodel__, mid)
+    row = q.message_dict(db, mid)
     if row is None:
         return error("not found", 404)
-    _room, mem = ops.room_access(db, uid, row.room_id)
+    _room, mem = ops.room_access(db, uid, row["room_id"])
     if mem is None:
         return error("not found", 404)
-    from sqlmodel import select as _select
-    from campfile.db import Boost as _B
-    boosts = db.exec(_select(_B.__sqlmodel__).where(
-        _B.__sqlmodel__.message_id == mid)).all()
-    return jsonify([{"id": b.id, "content": b.content,
-                     "booster_id": b.booster_id} for b in boosts])
+    from campfile import fq as _fq
+    boosts = _fq.rows(db, _fq.BoostQuery([])
+                       .where(_fq.pred('boost.message_id == param("mid")'))
+                       .project(["boost.id", "boost.content",
+                                 "boost.booster_id"]),
+                       {"mid": mid})
+    return jsonify([{"id": b["id"], "content": b["content"],
+                     "booster_id": b["booster_id"]} for b in boosts])
 
 
 @bp.post("/messages/<int:mid>/boosts")
@@ -292,10 +303,10 @@ def boost_create(mid):
     if uid is None:
         return login_redirect()
     db = db_session()
-    row = db.get(Message.__sqlmodel__, mid)
+    row = q.message_dict(db, mid)
     if row is None:
         return error("not found", 404)
-    _room, mem = ops.room_access(db, uid, row.room_id)
+    _room, mem = ops.room_access(db, uid, row["room_id"])
     if mem is None:
         return error("not found", 404)
     data = request.get_json(silent=True) or {}
@@ -314,10 +325,10 @@ def boost_delete(mid, bid):
     if uid is None:
         return login_redirect()
     db = db_session()
-    row = db.get(Message.__sqlmodel__, mid)
+    row = q.message_dict(db, mid)
     if row is None:
         return error("not found", 404)
-    _room, mem = ops.room_access(db, uid, row.room_id)
+    _room, mem = ops.room_access(db, uid, row["room_id"])
     if mem is None:
         return error("not found", 404)
     if not ops.delete_boost(db, bid, mid, uid):
@@ -326,21 +337,29 @@ def boost_delete(mid, bid):
 
 
 def _user_list(room_id=None, filt=None):
-    from sqlalchemy import func as _func
+    from campfile import fq as _fq
     db = db_session()
-    U = User.__sqlmodel__
-    query = select(U).where(U.status == 0)
+    conds = ["user.status == 0"]
+    params = {}
     if room_id is not None:
-        M = Membership.__sqlmodel__
-        ids = [m.user_id for m in db.exec(
-            select(M).where(M.room_id == room_id)).all()]
-        query = query.where(U.id.in_(ids)) if ids else query.where(False)
+        mems = _fq.rows(db, _fq.MembershipQuery([])
+                         .where(_fq.pred('membership.room_id == param("rid")'))
+                         .project(["membership.user_id"]),
+                         {"rid": room_id})
+        ids = [m["user_id"] for m in mems]
+        if not ids:
+            return []
+        conds.append("user.id in [%s]" % ",".join(str(int(i)) for i in ids))
     if filt:
-        like = "%" + filt.lower() + "%"
-        query = query.where(_func.lower(U.name).like(like))
-    query = query.order_by(_func.lower(U.name)).limit(20)
-    return [{"id": u.id, "name": u.name, "label": u.name}
-            for u in db.exec(query).all()]
+        conds.append("like(lower(user.name), param(\"pat\"))")
+        params["pat"] = "%" + filt.lower() + "%"
+    chain = (_fq.UserQuery([])
+             .where(_fq.pred(" and ".join(conds)))
+             .order_by(_fq.order("lower(user.name)"))
+             .take(20))
+    return [{"id": u["id"], "name": u["name"], "label": u["name"]}
+            for u in _fq.rows(db, chain.project(
+                ["user.id", "user.name"]), params)]
 
 
 @bp.get("/autocompletable/users")

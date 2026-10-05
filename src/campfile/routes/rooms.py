@@ -61,7 +61,7 @@ def post_message(room_id: int):
     if not res.ok:
         return error(res.error, 422)
     return present(q.message_view(
-        db, res.value,
-        q._users_by_id(db, [res.value.creator_id]), {}, {},
-        {res.value.id: body},
+        res.value,
+        q._users_by_id(db, [res.value["creator_id"]]), {}, {},
+        {res.value["id"]: body},
     )), 201

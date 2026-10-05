@@ -76,7 +76,7 @@ def session():
     if user is None:
         return error("Too many requests or unauthorized.", 401)
     token = q.start_session(
-        db, user.id, request.remote_addr or "", request.user_agent.string or "",
+        db, user["id"], request.remote_addr or "", request.user_agent.string or "",
         int(time.time()),
     )
     response = redirect("/")
