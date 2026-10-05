@@ -25,3 +25,6 @@ packages = ["src/campfile"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[dependency-groups]
+dev = ["pytest"]

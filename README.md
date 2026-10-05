@@ -148,7 +148,8 @@ seeding, Porter stemming, the inverted index and the five hot paths).
 
 ```bash
 uv venv && uv pip install -e .
-.venv/bin/pytest tests/                     # 171 domain + 34 workload checks
+.venv/bin/python tests/test_campfire.py  # 171 domain checks
+.venv/bin/python tests/test_workload.py  # 34 workload checks (porter, pages, search)
 .venv/bin/gunicorn -w 4 wsgi:app           # one in-memory store per worker
 .venv/bin/python bench/bench_http.py http://127.0.0.1:5057 --concurrency 12
 ```
