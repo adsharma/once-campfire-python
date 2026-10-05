@@ -2,18 +2,19 @@
 
 from flask import Blueprint, request
 
+from .. import queries as q
 from .. import state as st
-from ..domain import workload as w
-from .helpers import current_uid, error, present_list
+from .helpers import actor_or_login, default_uid, error, present_list
 
 bp = Blueprint("sidebar", __name__)
 
 
 @bp.get("/users/me/sidebar")
 def sidebar():
-    store = st.get_store()
-    uid = current_uid(request.args, store.users[0].id)
-    res = w.sidebar(store, uid)
+    uid, login = actor_or_login(request.args, default_uid())
+    if login is not None:
+        return login
+    res = q.sidebar(st.get_db(), uid)
     if not res.ok:
         return error(res.error, 404)
     return present_list(res.value)

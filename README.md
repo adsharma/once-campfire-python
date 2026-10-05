@@ -160,25 +160,40 @@ Routes mirror `bench/compare_http.rb`: `GET /rooms/<id>`,
 
 Measured on this machine (4 gunicorn sync workers, 12 client threads,
 60 users / 3000 messages synthetic seed) vs the Ruby numbers from
-`../once-campfire` (16 clients, fixed seed):
+`../once-campfire` (16 clients, fixed seed). The SQLite column exercises
+cookie login per thread (like the Rails bench); the in-memory column
+uses the `?as=` backdoor:
 
-| path | campfile req/s (p50) | Ruby req/s |
-|---|---|---|
-| room | 3074 (3.7ms) | 244 |
-| messages | 3008 (3.7ms) | 424 |
-| sidebar | 3371 (3.3ms) | 556 |
-| search | 1034 (11.3ms) | 432 |
-| post | 3127 (3.6ms) | 258 |
+| path | SQLite+auth req/s (p50) | in-memory req/s | Ruby req/s |
+|---|---|---|---|
+| room | 1335 (8.1ms) | 3074 | 244 |
+| messages | 1411 (7.8ms) | 3008 | 424 |
+| sidebar | 2461 (4.2ms) | 3371 | 556 |
+| search | 1612 (6.8ms) | 1034 | 432 |
+| post | 1151 (7.6ms) | 3127 | 258 |
 
 Read this as methodology, not victory: different corpora and hardware,
-JSON API vs full HTML/ActionText rendering, no auth/CSRF, no DB
-round-trips (in-memory store), no ActionCable, CPython vs Ruby+Puma.
-The Ruby request does far more work per request — HTML rendering parity
-(and a persistent store) is what would make this apples-to-apples.
-What the numbers do show: the ported data plane (pagination, sidebar
-assembly, stemmed-index search, posting with unread fan-out) sustains
-~3k req/s per path with p99 < 7ms, search at ~1k req/s after moving
-postings to a one-pass sorted merge.
+JSON API vs full HTML/ActionText rendering, no CSRF, CPython vs
+Ruby+Puma. The Ruby request does far more work per request — HTML
+rendering parity is what would make this fully apples-to-apples. What
+changed structurally: SQLite (WAL) round-trips on every path, session
+token lookup per request, and FTS5-BM25 search in C (faster than the
+Python postings merge it replaced).
+
+## Compatibility with once-campfire-django
+
+Functional compatibility target: same database, same session model, same
+routes. Verified by `tests/test_compat.py` (reads/writes a database
+created from their `schema.sql`) and `tests/test_auth.py` (20 flow checks).
+
+| Area | Status |
+|---|---|
+| Tables/columns | same names for all Rails tables; string `involvement`/`type`, `email_address`, `password_digest`, porter FTS + triggers |
+| Bodies | `action_text_rich_texts` like Rails/Django (record `Message`, legacy `ActionText::RichText` accepted) |
+| Timestamps | integer epoch in, ISO datetime text out (Rails form); mixed-representation DBs order correctly, arithmetic coerces |
+| Sessions | bcrypt login, token rows, throttled touch, signed `session_token` cookie; banned/deactivated rejected |
+| Routes | same paths; 302 to `/session/new` when anonymous; 404 outside membership |
+| Known boundaries | cookie crypto is Flask-native (not Rails-interchangeable); `message_mentions` is an extension table; no ActiveStorage/media/Cable/jobs/push; timestamps differ from Django reads (ints vs datetimes in the in-memory layer only) |
 
 ## Known limitations
 

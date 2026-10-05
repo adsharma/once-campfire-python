@@ -22,3 +22,28 @@ def current_uid(args, default):
         return int(args.get("as", default))
     except ValueError:
         return default
+
+
+def actor_uid(args, default):
+    from flask import g
+    if g.get("user") is not None:
+        return g.user.id
+    return current_uid(args, default)
+
+
+def actor_or_login(args, default):
+    """Session user, else the ?as= bench backdoor, else login redirect."""
+    from flask import g, redirect
+    if g.get("user") is not None:
+        return g.user.id, None
+    if "as" in args:
+        return current_uid(args, default), None
+    return None, redirect("/session/new")
+
+
+def default_uid():
+    from sqlmodel import select
+
+    from .. import state as st
+    from ..db import User
+    return st.get_db().exec(select(User.__sqlmodel__.id)).first() or 0

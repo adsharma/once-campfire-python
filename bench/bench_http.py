@@ -19,24 +19,38 @@ import requests
 PATHS = ["room", "messages", "sidebar", "search", "post"]
 
 
-def build_targets(base, meta):
+def build_targets(base, meta, authed):
     wc = meta["watercooler"]
     uid = meta["first_user"]
     busy = meta["busy_message"]
+    suffix = "" if authed else ("?as=%d" % uid)
+    amp = "" if authed else ("&as=%d" % uid)
+    post_body = {"body": "bench hello coffee world"}
+    if not authed:
+        post_body["creator_id"] = uid
     return {
-        "room": ("GET", "%s/rooms/%d?as=%d" % (base, wc, uid), None),
-        "messages": ("GET", "%s/rooms/%d/messages?before=%d&as=%d" % (base, wc, busy, uid), None),
-        "sidebar": ("GET", "%s/users/me/sidebar?as=%d" % (base, uid), None),
-        "search": ("GET", "%s/searches?q=coffee&as=%d" % (base, uid), None),
-        "post": ("POST", "%s/rooms/%d/messages" % (base, wc),
-                 {"creator_id": uid, "body": "bench hello coffee world"}),
+        "room": ("GET", "%s/rooms/%d%s" % (base, wc, suffix), None),
+        "messages": ("GET", "%s/rooms/%d/messages?before=%d%s" % (base, wc, busy, amp), None),
+        "sidebar": ("GET", "%s/users/me/sidebar%s" % (base, suffix), None),
+        "search": ("GET", "%s/searches?q=coffee%s" % (base, amp), None),
+        "post": ("POST", "%s/rooms/%d/messages" % (base, wc), post_body),
     }
 
 
-def worker(method, url, payload, count, out, errors):
+def worker(method, url, payload, count, out, errors, login=None):
     sess = requests.Session()
     adapter = requests.adapters.HTTPAdapter(pool_connections=1, pool_maxsize=1)
     sess.mount("http://", adapter)
+    if login is not None:
+        try:
+            r = sess.post(login[0], json=login[1], timeout=30,
+                          allow_redirects=False)
+            if r.status_code not in (200, 302):
+                errors.append("login:%s" % r.status_code)
+                return
+        except Exception as e:  # noqa: BLE001
+            errors.append("login:%s" % e)
+            return
     lat = []
     ok = 0
     for _ in range(count):
@@ -58,14 +72,15 @@ def worker(method, url, payload, count, out, errors):
     out.append((ok, lat))
 
 
-def drive(base, path, method, url, payload, concurrency, count):
+def drive(base, path, method, url, payload, concurrency, count, login=None):
     threads = []
     out = []
     errors = []
     per = max(1, count // concurrency)
     t0 = time.perf_counter()
     for _ in range(concurrency):
-        th = threading.Thread(target=worker, args=(method, url, payload, per, out, errors))
+        th = threading.Thread(target=worker,
+                              args=(method, url, payload, per, out, errors, login))
         th.start()
         threads.append(th)
     for th in threads:
@@ -96,7 +111,7 @@ def main() -> int:
     argv = sys.argv[2:]
     rest = []
     for arg in argv:
-        if arg in ("--concurrency", "--requests", "--paths"):
+        if arg in ("--concurrency", "--requests", "--paths", "--password"):
             rest.append(arg + "=")
         elif rest and rest[-1].endswith("="):
             rest[-1] = rest[-1] + arg
@@ -109,16 +124,30 @@ def main() -> int:
             count = int(arg.split("=", 1)[1])
         elif arg.startswith("--paths="):
             wanted = arg.split("=", 1)[1].split(",")
+    password = "password"
+    for arg in rest:
+        if arg.startswith("--password="):
+            password = arg.split("=", 1)[1]
     meta = requests.get(base + "/__meta", timeout=30).json()
     print("meta: %s" % json.dumps(meta), flush=True)
-    targets = build_targets(base, meta)
+    login = (base + "/session",
+             {"email_address": "user0@example.com", "password": password})
+    probe = requests.Session()
+    try:
+        r = probe.post(login[0], json=login[1], timeout=30, allow_redirects=False)
+        authed = r.status_code in (200, 302)
+    except Exception:  # noqa: BLE001
+        authed = False
+    print("cookie login: %s" % ("ok" if authed else "fallback ?as="), flush=True)
+    targets = build_targets(base, meta, authed)
     results = []
     for path in wanted:
         method, url, payload = targets[path]
+        thread_login = login if authed else None
         # Warmup.
-        drive(base, path, method, url, payload, 1, 10)
+        drive(base, path, method, url, payload, 1, 10, thread_login)
         for conc in concurrencies:
-            res = drive(base, path, method, url, payload, conc, count)
+            res = drive(base, path, method, url, payload, conc, count, thread_login)
             results.append(res)
             print("%-8s c=%-3d %8.1f req/s  p50=%6.2fms p99=%6.2fms err=%d" % (
                 path, conc, res["req_per_sec"], res.get("p50_ms", 0),

@@ -1,11 +1,11 @@
-"""Per-process store holder (one in-memory store per gunicorn worker)."""
+"""Per-request accessors (engine is shared; sessions are per request)."""
 
-from flask import current_app
-
-
-def get_store():
-    return current_app.extensions["campfile_store"]
+from flask import current_app, g
 
 
-def get_index():
-    return current_app.extensions["campfire_index"]
+def get_engine():
+    return current_app.extensions["campfile_engine"]
+
+
+def get_db():
+    return g.db

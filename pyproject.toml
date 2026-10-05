@@ -5,6 +5,7 @@ description = "Basecamp Campfire domain in static Python, served over HTTP with 
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "bcrypt",
     "flask>=3",
     "gunicorn",
     "py2many>=0.9",
