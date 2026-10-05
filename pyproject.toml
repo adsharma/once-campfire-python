@@ -7,7 +7,7 @@ requires-python = ">=3.10"
 dependencies = [
     "bcrypt",
     "flask>=3",
-    "fquery",
+    "fquery>=0.6",
     "gunicorn",
     "py2many>=0.9",
     "requests",
@@ -18,9 +18,6 @@ dependencies = [
 # Latest py2many (with the Go/Lean lookup-table fixes this port needs);
 # remove to track the PyPI release instead.
 py2many = { path = "../py2many", editable = true }
-# Local fquery (query-tree SQL backend: joins, MATCH, bind params);
-# remove to track the PyPI release instead.
-fquery = { path = "../fquery", editable = true }
 
 [build-system]
 requires = ["hatchling"]
