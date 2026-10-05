@@ -6,3 +6,6 @@ out_*/
 *.egg-info/
 build/
 dist/
+*.db
+*.db-shm
+*.db-wal
