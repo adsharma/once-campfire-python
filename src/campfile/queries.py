@@ -94,6 +94,17 @@ def _mentions_by_message(session, ids: list) -> dict:
     return out
 
 
+def account_settings(account) -> dict:
+    import json as _json
+    if account is None or not account.settings:
+        return {}
+    try:
+        parsed = _json.loads(account.settings)
+    except (ValueError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def _bodies_by_message(session, ids: list) -> dict:
     RT = RichText.__sqlmodel__
     out = {}
@@ -319,8 +330,12 @@ def post_message_view(session, room_id: int, creator_id: int, body: str,
             "UPDATE memberships SET unread_at = :now, updated_at = :now "
             "WHERE room_id = :rid AND user_id != :uid "
             "AND involvement != 'invisible' "
-            "AND (connected_at IS NULL OR connected_at <= :cutoff)"
+            "AND (connected_at IS NULL OR connected_at < :cutoff)"
         ).bindparams(now=stamp, rid=room_id, uid=creator_id, cutoff=cutoff)
+    )
+    session.exec(
+        text("UPDATE rooms SET updated_at = :t WHERE id = :rid")
+        .bindparams(t=stamp, rid=room_id)
     )
     session.commit()
     session.refresh(row)

@@ -169,7 +169,7 @@ uses the `?as=` backdoor:
 | room | 1335 (8.1ms) | 3074 | 244 |
 | messages | 1411 (7.8ms) | 3008 | 424 |
 | sidebar | 2461 (4.2ms) | 3371 | 556 |
-| search | 1612 (6.8ms) | 1034 | 432 |
+| search | 826 (13.4ms) | 1034 | 432 |
 | post | 1151 (7.6ms) | 3127 | 258 |
 
 Read this as methodology, not victory: different corpora and hardware,
@@ -178,7 +178,8 @@ Ruby+Puma. The Ruby request does far more work per request — HTML
 rendering parity is what would make this fully apples-to-apples. What
 changed structurally: SQLite (WAL) round-trips on every path, session
 token lookup per request, and FTS5-BM25 search in C (faster than the
-Python postings merge it replaced).
+Python postings merge it replaced). Search parity costs: Django's
+`LIMIT 100` (vs the earlier 20) builds 5x views per query.
 
 ## Compatibility with once-campfire-django
 
@@ -192,7 +193,8 @@ created from their `schema.sql`) and `tests/test_auth.py` (20 flow checks).
 | Bodies | `action_text_rich_texts` like Rails/Django (record `Message`, legacy `ActionText::RichText` accepted) |
 | Timestamps | integer epoch in, ISO datetime text out (Rails form); mixed-representation DBs order correctly, arithmetic coerces |
 | Sessions | bcrypt login, token rows, throttled touch, signed `session_token` cookie; banned/deactivated rejected |
-| Routes | same paths; 302 to `/session/new` when anonymous; 404 outside membership |
+| Routes | same paths (`rooms/<kind>`, bot keys, boosts, `/autocompletable/users`, `searches/clear`, `account/*`, `users/*`); 302 to `/session/new` when anonymous; 403/404/401/422 matching Django; 204 on deletes; bot `Location` + `X-Total-Count`/`Link` headers |
+| Behavior | unread fan-out (`connected_at < now-60`, invisible excluded), open-room grants on signup, direct-room dedupe, 10-query search history cap, `restrict_room_creation_to_administrators` gate, deactivate/ban semantics (session/IP cleanup, email rewrite, status flips) |
 | Known boundaries | cookie crypto is Flask-native (not Rails-interchangeable); `message_mentions` is an extension table; no ActiveStorage/media/Cable/jobs/push; timestamps differ from Django reads (ints vs datetimes in the in-memory layer only) |
 
 ## Known limitations

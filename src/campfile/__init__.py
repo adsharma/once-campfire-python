@@ -15,7 +15,12 @@ from . import queries as q
 from .config import Config
 from .db import create_schema, get_engine, load_store
 from .domain import workload as w
+from .routes.account import bp as account_bp
+from .routes.bots_api import bp as bots_api_bp
+from .routes.manage import bp as manage_bp
 from .routes.meta import bp as meta_bp
+from .routes.onboard import bp as onboard_bp
+from .routes.people import bp as people_bp
 from .routes.rooms import bp as rooms_bp
 from .routes.search import bp as search_bp
 from .routes.session import bp as session_bp
@@ -84,8 +89,13 @@ def create_app(config=None):
             db.close()
 
     app.register_blueprint(meta_bp)
+    app.register_blueprint(onboard_bp)
     app.register_blueprint(rooms_bp)
+    app.register_blueprint(manage_bp)
+    app.register_blueprint(bots_api_bp)
     app.register_blueprint(sidebar_bp)
     app.register_blueprint(search_bp)
     app.register_blueprint(session_bp)
+    app.register_blueprint(account_bp)
+    app.register_blueprint(people_bp)
     return app

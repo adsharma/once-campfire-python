@@ -12,8 +12,7 @@ from flask import Blueprint, g, redirect, request
 from itsdangerous import BadSignature, URLSafeSerializer
 
 from .. import queries as q
-from .. import state as st
-from .helpers import error
+from .helpers import db_session, error
 
 bp = Blueprint("session", __name__)
 COOKIE = "session_token"
@@ -34,13 +33,23 @@ def load_user():
     except BadSignature:
         g.user = None
         return
-    g.user = q.user_from_token(st.get_db(), token, int(time.time()))
+    g.user = q.user_from_token(db_session(), token, int(time.time()))
 
 
 def require_user():
     if g.get("user") is None:
         return redirect("/session/new")
     return None
+
+
+def issue_session(db, user_id, remote_addr, agent, now):
+    token = q.start_session(db, user_id, remote_addr, agent, now)
+    return token
+
+
+def session_cookie(resp, token):
+    resp.set_cookie(COOKIE, _signer().dumps(token), httponly=True)
+    return resp
 
 
 @bp.get("/session/new")
@@ -55,7 +64,7 @@ def session_new():
 
 @bp.post("/session")
 def session():
-    db = st.get_db()
+    db = db_session()
     if request.is_json:
         payload = request.get_json(silent=True) or {}
         email = str(payload.get("email_address", ""))
@@ -65,7 +74,7 @@ def session():
         password = request.form.get("password", "")
     user = q.authenticate(db, email, password)
     if user is None:
-        return error("invalid email or password", 422)
+        return error("Too many requests or unauthorized.", 401)
     token = q.start_session(
         db, user.id, request.remote_addr or "", request.user_agent.string or "",
         int(time.time()),
@@ -80,7 +89,7 @@ def destroy_session():
     raw = request.cookies.get(COOKIE, "")
     if raw:
         try:
-            q.end_session(st.get_db(), _signer().loads(raw))
+            q.end_session(db_session(), _signer().loads(raw))
         except BadSignature:
             pass
     response = redirect("/session/new")

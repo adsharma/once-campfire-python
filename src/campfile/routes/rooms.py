@@ -5,8 +5,7 @@ import time
 from flask import Blueprint, request
 
 from .. import queries as q
-from .. import state as st
-from .helpers import actor_or_login, default_uid, error, present, present_list
+from .helpers import actor_or_login, db_session, error, login_redirect, present, present_list
 
 bp = Blueprint("rooms", __name__)
 
@@ -20,10 +19,10 @@ def _int_arg(name, default=0):
 
 @bp.get("/rooms/<int:room_id>")
 def room_page(room_id: int):
-    uid, login = actor_or_login(request.args, default_uid())
-    if login is not None:
-        return login
-    res = q.room_page(st.get_db(), room_id, uid)
+    uid = actor_or_login()
+    if uid is None:
+        return login_redirect()
+    res = q.room_page(db_session(), room_id, uid)
     if not res.ok:
         return error(res.error, 404)
     return present(res.value)
@@ -31,11 +30,11 @@ def room_page(room_id: int):
 
 @bp.get("/rooms/<int:room_id>/messages")
 def room_messages(room_id: int):
-    uid, login = actor_or_login(request.args, default_uid())
-    if login is not None:
-        return login
+    uid = actor_or_login()
+    if uid is None:
+        return login_redirect()
     res = q.messages_page(
-        st.get_db(), room_id, uid, _int_arg("before"), _int_arg("after")
+        db_session(), room_id, uid, _int_arg("before"), _int_arg("after")
     )
     if not res.ok:
         return error(res.error, 404)
@@ -44,18 +43,16 @@ def room_messages(room_id: int):
 
 @bp.post("/rooms/<int:room_id>/messages")
 def post_message(room_id: int):
-    db = st.get_db()
+    db = db_session()
     payload = request.get_json(force=True, silent=True) or {}
-    from flask import g, redirect
-    if g.get('user') is not None:
-        creator = g.user.id
-    elif "creator_id" in payload:
+    creator = actor_or_login()
+    if creator is None:
         try:
-            creator = int(payload.get("creator_id", default_uid()))
+            creator = int(payload.get("creator_id", 0))
         except ValueError:
-            creator = default_uid()
-    else:
-        return redirect("/session/new")
+            creator = 0
+    if not creator:
+        return login_redirect()
     body = str(payload.get("body", ""))
     res = q.post_message_view(
         db, room_id, creator, body,

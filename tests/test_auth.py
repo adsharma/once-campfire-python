@@ -46,10 +46,10 @@ check("login redirect", r.status_code == 302)
 check("session cookie", "session_token=" in r.headers.get("Set-Cookie", ""))
 r = client.post("/session", json={"email_address": "user0@example.com",
                                   "password": "wrong"})
-check("wrong password", r.status_code == 422)
+check("wrong password", r.status_code == 401)
 r = client.post("/session", json={"email_address": "nobody@example.com",
                                   "password": "password"})
-check("unknown email", r.status_code == 422)
+check("unknown email", r.status_code == 401)
 
 # --- authed access ---------------------------------------------------------------
 entries = client.get("/users/me/sidebar").get_json()
@@ -101,7 +101,7 @@ with Session(app.extensions["campfile_engine"]) as db:
     db.commit()
 r = client.post("/session", json={"email_address": "user2@example.com",
                                   "password": "password"})
-check("banned rejected", r.status_code == 422)
+check("banned rejected", r.status_code == 401)
 
 # --- logout --------------------------------------------------------------------------
 r = client.delete("/session")
