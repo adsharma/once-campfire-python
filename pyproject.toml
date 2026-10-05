@@ -1,0 +1,27 @@
+[project]
+name = "campfile"
+version = "0.1.0"
+description = "Basecamp Campfire domain in static Python, served over HTTP with Flask"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "flask>=3",
+    "gunicorn",
+    "py2many>=0.9",
+    "requests",
+]
+
+[tool.uv.sources]
+# Latest py2many (with the Go/Lean lookup-table fixes this port needs);
+# remove to track the PyPI release instead.
+py2many = { path = "../py2many", editable = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/campfile"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

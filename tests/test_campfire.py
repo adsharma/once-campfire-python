@@ -19,7 +19,7 @@ except ImportError:
     sys.modules["py2many"] = _pkg
     sys.modules["py2many.spec"] = _spec
 
-import campfire as c
+from campfile.domain import campfire as c
 
 PASSED = 0
 FAILED = 0

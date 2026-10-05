@@ -138,6 +138,47 @@ of this port's output and `lake build` of its Lean output:
   `(try simp_all) <;> (first | omega | decide | grind)` return tactic,
   `Int` widening for `-1` sentinels with call-site `.toNat`/coercions.
 
+## HTTP app + benchmark (`campfile` package)
+
+`src/campfile` is an idiomatic Flask app (factory in `campfile/__init__.py`,
+blueprints in `campfile/routes/`, config in `campfile/config.py`, `wsgi.py`
+entry point) over the port. The domain stays in `campfile/domain/`
+(`campfire.py` is still the single transpilable unit; `workload.py` adds
+seeding, Porter stemming, the inverted index and the five hot paths).
+
+```bash
+uv venv && uv pip install -e .
+.venv/bin/pytest tests/                     # 171 domain + 34 workload checks
+.venv/bin/gunicorn -w 4 wsgi:app           # one in-memory store per worker
+.venv/bin/python bench/bench_http.py http://127.0.0.1:5057 --concurrency 12
+```
+
+Routes mirror `bench/compare_http.rb`: `GET /rooms/<id>`,
+`GET /rooms/<id>/messages?before=`, `GET /users/me/sidebar`,
+`GET /searches?q=`, `POST /rooms/<id>/messages`, plus `/__meta`.
+
+Measured on this machine (4 gunicorn sync workers, 12 client threads,
+60 users / 3000 messages synthetic seed) vs the Ruby numbers from
+`../once-campfire` (16 clients, fixed seed):
+
+| path | campfile req/s (p50) | Ruby req/s |
+|---|---|---|
+| room | 3074 (3.7ms) | 244 |
+| messages | 3008 (3.7ms) | 424 |
+| sidebar | 3371 (3.3ms) | 556 |
+| search | 1034 (11.3ms) | 432 |
+| post | 3127 (3.6ms) | 258 |
+
+Read this as methodology, not victory: different corpora and hardware,
+JSON API vs full HTML/ActionText rendering, no auth/CSRF, no DB
+round-trips (in-memory store), no ActionCable, CPython vs Ruby+Puma.
+The Ruby request does far more work per request — HTML rendering parity
+(and a persistent store) is what would make this apples-to-apples.
+What the numbers do show: the ported data plane (pagination, sidebar
+assembly, stemmed-index search, posting with unread fan-out) sustains
+~3k req/s per path with p99 < 7ms, search at ~1k req/s after moving
+postings to a one-pass sorted merge.
+
 ## Known limitations
 
 - Go string iteration is byte-wise; Python is code-point-wise. Outcomes are
