@@ -84,6 +84,8 @@ def create_app(config=None):
 
     @app.teardown_request
     def _close_session(exc):
+        from fquery import env
+        env.use(None)
         db = g.pop("db", None)
         if db is not None:
             db.close()

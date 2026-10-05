@@ -13,6 +13,7 @@ from flask import Blueprint, jsonify, request
 from campfile import queries as q
 from campfile.db import Message
 from campfile import ops
+from campfile.fq import use_db
 from campfile.routes.helpers import db_session, error
 
 bp = Blueprint("bots_api", __name__)
@@ -26,6 +27,7 @@ def _room_for_bot(db, bot, rid: int):
 @bp.get("/rooms/<int:rid>/<bot_key>/messages")
 def bot_list(rid, bot_key):
     db = db_session()
+    use_db(db)
     bot = ops.bot_auth(db, bot_key)
     if bot is None:
         return error("unauthorized", 401)
@@ -51,11 +53,10 @@ def bot_list(rid, bot_key):
         keys = "message.created_at"
     else:
         keys = "desc(message.created_at)"
-    rows = _fq.rows(db, _fq.MessageQuery([])
+    rows = (_fq.MessageQuery([])
                     .where(_fq.pred(" and ".join(conds)))
                     .order_by(_fq.order(keys))
-                    .take(40).project(q.MSG_COLS),
-                    params)
+                    .take(40).project(q.MSG_COLS)).bind(**(params)).rows()
     if direction == "before":
         rows = list(reversed(rows))
     if not rows:
@@ -63,10 +64,9 @@ def bot_list(rid, bot_key):
     import dataclasses
     body = jsonify([dataclasses.asdict(v)
                     for v in q.views_for(db, list(rows))])
-    total = _fq.rows(db, _fq.MessageQuery([])
+    total = (_fq.MessageQuery([])
                      .where(_fq.pred('message.room_id == param("rid")'))
-                     .count(),
-                     {"rid": rid})
+                     .count()).bind(**({"rid": rid})).rows()
     body.headers["X-Total-Count"] = str(
         total[0]["COUNT(*)"] if total else 0)
     edge = rows[-1] if direction == "after" else rows[0]
@@ -74,11 +74,10 @@ def bot_list(rid, bot_key):
         more_cond = "message.created_at > param(\"ts\")"
     else:
         more_cond = "message.created_at < param(\"ts\")"
-    more = _fq.rows(db, _fq.MessageQuery([])
+    more = (_fq.MessageQuery([])
                     .where(_fq.pred(
                         'message.room_id == param("rid") and (%s)' % more_cond))
-                    .take(1).project(["message.id"]),
-                    {"rid": rid, "ts": edge["created_at"]})
+                    .take(1).project(["message.id"])).bind(**({"rid": rid, "ts": edge["created_at"]})).rows()
     if more:
         body.headers["Link"] = (
             "</rooms/%d/%s/messages?%s=%d>; rel=\"next\""

@@ -5,29 +5,32 @@ from sqlalchemy import text
 
 from .. import state as st
 from campfile import fq as _fq
+from campfile.fq import MessageQuery, RoomQuery, UserQuery, use_db
 
 bp = Blueprint("meta", __name__)
 
 
 def _count(db, qcls, alias):
-    rows = _fq.rows(db, qcls([]).count())
+    use_db(db)
+    rows = (qcls([]).count()).rows()
     return rows[0]["COUNT(*)"] if rows else 0
 
 
 def _first_id(db, qcls, alias):
-    rows = _fq.rows(db, qcls([]).order_by(_fq.order(alias + ".id"))
-                    .take(1).project([alias + ".id"]))
+    use_db(db)
+    rows = (qcls([]).order_by(_fq.order(alias + ".id"))
+                    .take(1).project([alias + ".id"])).rows()
     return rows[0]["id"] if rows else 0
 
 
 @bp.get("/__meta")
 def meta():
     db = st.get_db()
-    from campfile.fq import MessageQuery, RoomQuery, UserQuery
+    use_db(db)
     total = _count(db, MessageQuery, "message")
-    mid = _fq.rows(db, MessageQuery([])
+    mid = (MessageQuery([])
                    .order_by(_fq.order("message.id"))
-                   .take(1).skip(total // 2).project(["message.id"]))
+                   .take(1).skip(total // 2).project(["message.id"])).rows()
     fts = db.exec(text("SELECT count(*) FROM message_search_index")).one()[0]
     return jsonify({
         "users": _count(db, UserQuery, "user"),

@@ -12,6 +12,7 @@ from flask import Blueprint, jsonify, request
 from campfile.db import User
 from campfile.domain import campfire as c
 from campfile import ops
+from campfile.fq import use_db
 from campfile.routes.helpers import actor_or_login, db_session, error, login_redirect
 
 bp = Blueprint("people", __name__)
@@ -23,6 +24,7 @@ def profile():
     if uid is None:
         return login_redirect()
     db = db_session()
+    use_db(db)
     me = db.get(User.__sqlmodel__, uid)
     if me is None:
         return error("not found", 404)
@@ -35,18 +37,17 @@ def profile():
                            payload.get("password", ""), int(time.time()))
     from campfile import fq as _fq
     shared, direct = [], []
-    mems = _fq.rows(db, _fq.MembershipQuery([])
+    mems = (_fq.MembershipQuery([])
                      .where(_fq.pred('membership.user_id == param("uid")'))
                      .project(["membership.id", "membership.room_id",
-                               "membership.involvement"]),
-                     {"uid": uid})
+                               "membership.involvement"])).bind(**({"uid": uid})).rows()
     rids = list({m["room_id"] for m in mems})
     by_room = {}
     if rids:
         in_list = ",".join(str(int(i)) for i in rids)
-        for r in _fq.rows(db, _fq.RoomQuery([])
+        for r in (_fq.RoomQuery([])
                            .where(_fq.pred("room.id in [%s]" % in_list))
-                           .project(["room.id", "room.name", "room.type"])):
+                           .project(["room.id", "room.name", "room.type"])).rows():
             by_room[r["id"]] = r
     for mem in mems:
         room = by_room.get(mem["room_id"])

@@ -13,6 +13,7 @@ from campfile.db import Account, Room, User
 from campfile.domain import campfire as c
 from campfile import ops
 from campfile.routes import session as session_routes
+from campfile.fq import use_db
 from campfile.routes.helpers import actor_or_login, db_session, error
 
 bp = Blueprint("onboard", __name__)
@@ -21,18 +22,18 @@ bp = Blueprint("onboard", __name__)
 @bp.get("/")
 def welcome():
     db = db_session()
+    use_db(db)
     if ops.account_row(db) is None:
         return redirect("/first_run")
     uid = actor_or_login()
     if uid is None:
         return redirect("/session/new")
     from campfile import fq as _fq
-    first = _fq.rows(db, _fq.RoomWithMembershipsQuery([])
+    first = (_fq.RoomWithMembershipsQuery([])
                    .edge("memberships", _fq.JoinOn("id", "room_id"))
                    .where(_fq.pred('membership.user_id == param("uid")'))
                    .order_by(_fq.order("room.created_at"))
-                   .take(1).project(["room.id"]),
-                   {"uid": uid})
+                   .take(1).project(["room.id"])).bind(**({"uid": uid})).rows()
     if first:
         return redirect("/rooms/%d" % first[0]["id"])
     return jsonify({"welcome": True})

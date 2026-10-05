@@ -29,12 +29,13 @@ def order(text: str) -> ast.Expr:
     return ast.Expr(text)
 
 
-def rows(session, chain, params=None) -> list:
-    """Run a chain on the session's own connection (sees flushed writes)."""
+def use_db(session) -> None:
+    """Point chains at this session's connection (once per entry point)."""
+    from fquery import env
     conn = session.connection().connection.driver_connection
     if not isinstance(conn, sqlite3.Connection):
         raise TypeError("fquery runner needs a sqlite3 connection")
-    return chain.to_rows(conn, params)
+    env.use(conn)
 
 
 @node

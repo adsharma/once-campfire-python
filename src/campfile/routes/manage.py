@@ -14,6 +14,7 @@ from campfile import queries as q
 from campfile.db import User
 from campfile.domain import campfire as c
 from campfile import ops
+from campfile.fq import use_db
 from campfile.routes.helpers import actor_or_login, db_session, error, login_redirect, present, present_list
 
 bp = Blueprint("manage", __name__)
@@ -47,6 +48,7 @@ def room_create(kind):
     if kind not in KINDS:
         return error("not found", 404)
     db = db_session()
+    use_db(db)
     me = db.get(User.__sqlmodel__, uid)
     if kind != "directs":
         account = ops.account_row(db)
@@ -66,9 +68,9 @@ def room_create(kind):
             return error("name required", 422)
     else:
         from campfile import fq as _fq
-        actives = _fq.rows(db, _fq.UserQuery([])
+        actives = (_fq.UserQuery([])
                            .where(_fq.pred("user.status == 0"))
-                           .project(["user.id"]))
+                           .project(["user.id"])).rows()
         ids = [u["id"] for u in actives]
         if not name:
             return error("name required", 422)
@@ -166,25 +168,22 @@ def refresh(rid):
     from campfile.db import to_db_time
     stamp = to_db_time(int(since))
     db = db_session()
+    use_db(db)
     room, _mem = ops.room_access(db, uid, rid)
     if room is None:
         return error("not found", 404)
     from campfile import fq as _fq
-    new_rows = _fq.rows(
-        db, _fq.MessageQuery([])
+    new_rows = (_fq.MessageQuery([])
         .where(_fq.pred('message.room_id == param("rid")'
                         ' and message.created_at > param("ts")'))
         .order_by(_fq.order("message.created_at"))
-        .take(40).project(q.MSG_COLS),
-        {"rid": rid, "ts": stamp})
+        .take(40).project(q.MSG_COLS)).bind(**({"rid": rid, "ts": stamp})).rows()
     new_ids = [m["id"] for m in new_rows]
-    upd_rows = [m for m in _fq.rows(
-        db, _fq.MessageQuery([])
+    upd_rows = [m for m in (_fq.MessageQuery([])
         .where(_fq.pred('message.room_id == param("rid")'
                         ' and message.updated_at > param("ts")'))
         .order_by(_fq.order("desc(message.created_at)"))
-        .take(40).project(q.MSG_COLS + ["message.updated_at"]),
-        {"rid": rid, "ts": stamp}) if m["id"] not in set(new_ids)]
+        .take(40).project(q.MSG_COLS + ["message.updated_at"])).bind(**({"rid": rid, "ts": stamp})).rows() if m["id"] not in set(new_ids)]
     upd_rows.reverse()
     import dataclasses
     return jsonify({
@@ -281,6 +280,7 @@ def boost_list(mid):
     if uid is None:
         return login_redirect()
     db = db_session()
+    use_db(db)
     row = q.message_dict(db, mid)
     if row is None:
         return error("not found", 404)
@@ -288,11 +288,10 @@ def boost_list(mid):
     if mem is None:
         return error("not found", 404)
     from campfile import fq as _fq
-    boosts = _fq.rows(db, _fq.BoostQuery([])
+    boosts = (_fq.BoostQuery([])
                        .where(_fq.pred('boost.message_id == param("mid")'))
                        .project(["boost.id", "boost.content",
-                                 "boost.booster_id"]),
-                       {"mid": mid})
+                                 "boost.booster_id"])).bind(**({"mid": mid})).rows()
     return jsonify([{"id": b["id"], "content": b["content"],
                      "booster_id": b["booster_id"]} for b in boosts])
 
@@ -339,13 +338,13 @@ def boost_delete(mid, bid):
 def _user_list(room_id=None, filt=None):
     from campfile import fq as _fq
     db = db_session()
+    use_db(db)
     conds = ["user.status == 0"]
     params = {}
     if room_id is not None:
-        mems = _fq.rows(db, _fq.MembershipQuery([])
+        mems = (_fq.MembershipQuery([])
                          .where(_fq.pred('membership.room_id == param("rid")'))
-                         .project(["membership.user_id"]),
-                         {"rid": room_id})
+                         .project(["membership.user_id"])).bind(**({"rid": room_id})).rows()
         ids = [m["user_id"] for m in mems]
         if not ids:
             return []
@@ -358,8 +357,8 @@ def _user_list(room_id=None, filt=None):
              .order_by(_fq.order("lower(user.name)"))
              .take(20))
     return [{"id": u["id"], "name": u["name"], "label": u["name"]}
-            for u in _fq.rows(db, chain.project(
-                ["user.id", "user.name"]), params)]
+            for u in (chain.project(
+                ["user.id", "user.name"])).bind(**(params)).rows()]
 
 
 @bp.get("/autocompletable/users")

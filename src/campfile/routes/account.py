@@ -14,6 +14,7 @@ from campfile import queries as q
 from campfile.db import User, to_db_time
 from campfile.domain import campfire as c
 from campfile import ops
+from campfile.fq import use_db
 from campfile.routes.helpers import actor_or_login, db_session, error, login_redirect
 
 bp = Blueprint("account", __name__)
@@ -38,6 +39,7 @@ def account_show():
     if uid is None:
         return login_redirect()
     db = db_session()
+    use_db(db)
     me = db.get(User.__sqlmodel__, uid)
     account = ops.account_row(db)
     if account is None:
@@ -47,14 +49,13 @@ def account_show():
         status_pred = "user.status == 0"
     else:
         status_pred = "user.status in [0, 2]"
-    users = _fq.rows(db, _fq.UserQuery([])
+    users = (_fq.UserQuery([])
                      .where(_fq.pred(
                          'user.role != param("bot") and (%s)' % status_pred))
                      .order_by(_fq.order("lower(user.name)"))
                      .take(500)
                      .project(["user.id", "user.name", "user.email_address",
-                               "user.role", "user.status"]),
-                     {"bot": c.ROLE_BOT})
+                               "user.role", "user.status"])).bind(**({"bot": c.ROLE_BOT})).rows()
     admins = [_user_json(u) for u in users if u["role"] == c.ROLE_ADMIN]
     members = [_user_json(u) for u in users if u["role"] != c.ROLE_ADMIN]
     return jsonify({
@@ -120,23 +121,21 @@ def bots_list():
     if uid is None:
         return login_redirect()
     db = db_session()
+    use_db(db)
     if _admin(db, uid) is None:
         return error("forbidden", 403)
     from campfile import fq as _fq
     out = []
-    bots = _fq.rows(db, _fq.UserQuery([])
+    bots = (_fq.UserQuery([])
                     .where(_fq.pred(
                         'user.role == param("bot") and user.status == 0'))
                     .order_by(_fq.order("lower(user.name)"))
-                    .project(["user.id", "user.name", "user.bot_token"]),
-                    {"bot": c.ROLE_BOT})
+                    .project(["user.id", "user.name", "user.bot_token"])).bind(**({"bot": c.ROLE_BOT})).rows()
     for bot in bots:
-        rooms = [{"id": r["id"], "name": r["name"]} for r in _fq.rows(
-            db, _fq.RoomWithMembershipsQuery([])
+        rooms = [{"id": r["id"], "name": r["name"]} for r in (_fq.RoomWithMembershipsQuery([])
             .edge("memberships", _fq.JoinOn("id", "room_id"))
             .where(_fq.pred('membership.user_id == param("uid")'))
-            .project(["room.id", "room.name"]),
-            {"uid": bot["id"]})]
+            .project(["room.id", "room.name"])).bind(**({"uid": bot["id"]})).rows()]
         out.append({"id": bot["id"], "name": bot["name"],
                     "key": c.bot_key_of(bot["id"], bot["bot_token"] or ""),
                     "webhook": ops.bot_webhook(db, bot["id"]), "rooms": rooms})
